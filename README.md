@@ -43,6 +43,7 @@ open-claw-local-agent/
 ├── .gitignore                # Игнорируемые файлы и папки
 └── package.json              # Зависимости проекта
 
+---
 
 ## ⚙️ Инструкция по установке и запуску
 1. Клонирование репозитория и установка зависимостей
@@ -61,6 +62,8 @@ Bash
 node src/server.js
 Сервер запустится на http://localhost:3000.
 
+---
+
 ## 🧪 Тестирование API
 Пример запроса через PowerShell (Invoke-RestMethod):
 
@@ -75,8 +78,13 @@ Invoke-RestMethod -Uri "http://localhost:3000/v1/chat/completions" `
     -Method Post `
     -Body $body `
     -ContentType "application/json"
+
+---
+
 ## 🌐 English Documentation
 A high-performance local AI orchestrator built with Node.js (ES Modules) and node-llama-cpp, designed to run on consumer hardware with full hardware acceleration on a dedicated GPU.
+
+---
 
 ## 🚀 Architecture Features
 The project implements a two-step "Plan & Execute" pipeline that minimizes hallucinations and effectively solves complex tasks:
@@ -86,6 +94,8 @@ Planning Phase: The model analyzes the incoming user request and breaks it down 
 Execution Phase: The orchestrator sequentially passes each step through the language model, aggregating the output into a clean text report for the client.
 
 Thread Isolation (Worker Threads): Heavy inference computations are offloaded to a separate worker thread, preventing any blocking of the main Express server.
+
+---
 
 ## ⚙️ Quick Start (English)
 Bash
