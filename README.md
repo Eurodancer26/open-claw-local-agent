@@ -100,7 +100,6 @@ cd open-claw-local-agent
 npm install
 2. Подготовка модели
 Создай папку models в корне проекта и помести туда файл весов (например, qwen2.5-7b-instruct-q4_k_m.gguf):
->>>>>>> b2b52138bcd3dab627dd79e78acb2ddcef5246a2
 
 Bash
 mkdir models
@@ -161,4 +160,3 @@ node src/server.js
 <<<<<<< HEAD
 ```
 =======
->>>>>>> b2b52138bcd3dab627dd79e78acb2ddcef5246a2
