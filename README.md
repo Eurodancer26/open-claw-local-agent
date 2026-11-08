@@ -44,7 +44,7 @@ open-claw-local-agent/
 └── package.json              # Зависимости проекта
 
 
-⚙️ Инструкция по установке и запуску
+## ⚙️ Инструкция по установке и запуску
 1. Клонирование репозитория и установка зависимостей
 Bash
 git clone [https://github.com/Eurodancer26/open-claw-local-agent.git](https://github.com/Eurodancer26/open-claw-local-agent.git)
@@ -61,7 +61,7 @@ Bash
 node src/server.js
 Сервер запустится на http://localhost:3000.
 
-🧪 Тестирование API
+## 🧪 Тестирование API
 Пример запроса через PowerShell (Invoke-RestMethod):
 
 PowerShell
@@ -75,10 +75,10 @@ Invoke-RestMethod -Uri "http://localhost:3000/v1/chat/completions" `
     -Method Post `
     -Body $body `
     -ContentType "application/json"
-🌐 English Documentation
+## 🌐 English Documentation
 A high-performance local AI orchestrator built with Node.js (ES Modules) and node-llama-cpp, designed to run on consumer hardware with full hardware acceleration on a dedicated GPU.
 
-🚀 Architecture Features
+## 🚀 Architecture Features
 The project implements a two-step "Plan & Execute" pipeline that minimizes hallucinations and effectively solves complex tasks:
 
 Planning Phase: The model analyzes the incoming user request and breaks it down into sequential steps formatted as a structured JSON.
@@ -87,7 +87,7 @@ Execution Phase: The orchestrator sequentially passes each step through the lang
 
 Thread Isolation (Worker Threads): Heavy inference computations are offloaded to a separate worker thread, preventing any blocking of the main Express server.
 
-⚙️ Quick Start (English)
+## ⚙️ Quick Start (English)
 Bash
 git clone [https://github.com/Eurodancer26/open-claw-local-agent.git](https://github.com/Eurodancer26/open-claw-local-agent.git)
 cd open-claw-local-agent
