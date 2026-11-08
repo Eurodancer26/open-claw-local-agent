@@ -43,7 +43,7 @@ open-claw-local-agent/
 ├── .gitignore                # Игнорируемые файлы и папки
 └── package.json              # Зависимости проекта
 
-<!-- ============================================================================ -->
+
 
 # Local AI Orchestrator (OpenAI-Compatible Gateway)
 
