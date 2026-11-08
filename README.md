@@ -6,7 +6,7 @@
 
 ## 🚀 Архитектурные особенности
 
-Проект реализует двухшаговый конвейер **«План $\rightarrow$ Выполнение»** (Plan & Execute), который минимизирует галлюцинации и позволяет эффективно решать комплексные задачи:
+Проект реализует двухшаговый конвейер **«План → Выполнение»** (Plan & Execute), который минимизирует галлюцинации и позволяет эффективно решать комплексные задачи:
 1. **Фаза планирования:** Модель анализирует входящий запрос пользователя и декомпозирует его на последовательные шаги в формате структурированного JSON.
 2. **Фаза выполнения:** Оркестратор последовательно прогоняет каждый шаг через языковую модель, агрегируя результат в чистый текстовый отчет для клиента.
 3. **Изоляция потоков (Worker Threads):** Тяжелые вычисления инференса вынесены в отдельный поток, что исключает блокировку основного Express-сервера.
@@ -15,9 +15,9 @@
 
 ## 💻 Аппаратный стек и окружение
 
-* **Процессор:** AMD Ryzen 5
+* **Процессор:** AMD Ryzen 5 3600
 * **Видеокарта:** Intel Arc A580 (8 ГБ VRAM)
-* **Ускорение инференса:** 99 слоев модели полностью разгружены на GPU (Vulkan/SYCL бэкенд через `node-llama-cpp`).
+* **Ускорение инференса:** 99 слоев модели полностью разгружены на GPU (через `node-llama-cpp`).
 * **Время отклика:** Полный цикл декомпозиции и пошагового выполнения задачи занимает в среднем **3.5 – 6 секунд**.
 
 ---
@@ -35,7 +35,7 @@
 
 ```text
 open-claw-local-agent/
-├── models/                   # Директория для GGUF-моделей (в гита не попадает)
+├── models/                   # Директория для GGUF-моделей (в гит не попадает)
 │   └── qwen2.5-7b-instruct-q4_k_m.gguf
 ├── src/
 │   ├── server.js             # Главный шлюз, маршрутизация и оркестратор плана
@@ -43,49 +43,54 @@ open-claw-local-agent/
 ├── .gitignore                # Игнорируемые файлы и папки
 └── package.json              # Зависимости проекта
 
-<!-- ============================================================================ -->
 
-# Local AI Orchestrator (OpenAI-Compatible Gateway)
+⚙️ Инструкция по установке и запуску
+1. Клонирование репозитория и установка зависимостей
+Bash
+git clone [https://github.com/Eurodancer26/open-claw-local-agent.git](https://github.com/Eurodancer26/open-claw-local-agent.git)
+cd open-claw-local-agent
+npm install
+2. Подготовка модели
+Создай папку models в корне проекта и помести туда файл весов (например, qwen2.5-7b-instruct-q4_k_m.gguf):
 
-A high-performance local AI orchestrator built with **Node.js (ES Modules)** and **`node-llama-cpp`**, designed to run on consumer hardware with full hardware acceleration on a dedicated GPU.
+Bash
+mkdir models
+# Поместите скачанный .gguf файл внутрь папки models/
+3. Запуск сервера
+Bash
+node src/server.js
+Сервер запустится на http://localhost:3000.
 
----
+🧪 Тестирование API
+Пример запроса через PowerShell (Invoke-RestMethod):
 
-## 🚀 Architecture Features
+PowerShell
+$body = @{
+    messages = @(
+        @{ role = "user"; content = "Привет! Напиши короткий план подготовки к запуску проекта." }
+    )
+} | ConvertTo-Json -Depth 3
 
-The project implements a two-step **"Plan & Execute"** pipeline that minimizes hallucinations and effectively solves complex tasks:
-1. **Planning Phase:** The model analyzes the incoming user request and breaks it down into sequential steps formatted as a structured JSON.
-2. **Execution Phase:** The orchestrator sequentially passes each step through the language model, aggregating the output into a clean text report for the client.
-3. **Thread Isolation (Worker Threads):** Heavy inference computations are offloaded to a separate worker thread, preventing any blocking of the main Express server.
+Invoke-RestMethod -Uri "http://localhost:3000/v1/chat/completions" `
+    -Method Post `
+    -Body $body `
+    -ContentType "application/json"
+🌐 English Documentation
+A high-performance local AI orchestrator built with Node.js (ES Modules) and node-llama-cpp, designed to run on consumer hardware with full hardware acceleration on a dedicated GPU.
 
----
+🚀 Architecture Features
+The project implements a two-step "Plan & Execute" pipeline that minimizes hallucinations and effectively solves complex tasks:
 
-## 💻 Hardware Stack & Environment
+Planning Phase: The model analyzes the incoming user request and breaks it down into sequential steps formatted as a structured JSON.
 
-* **CPU:** AMD Ryzen 5
-* **GPU:** Intel Arc A580 (8 GB VRAM)
-* **Inference Acceleration:** 99 model layers are fully offloaded to the GPU (Vulkan/SYCL backend via `node-llama-cpp`).
-* **Response Time:** A full cycle of task decomposition and step-by-step execution takes roughly **3.5 – 6 seconds**.
+Execution Phase: The orchestrator sequentially passes each step through the language model, aggregating the output into a clean text report for the client.
 
----
+Thread Isolation (Worker Threads): Heavy inference computations are offloaded to a separate worker thread, preventing any blocking of the main Express server.
 
-## 🛠 Tech Stack
-
-* **Runtime:** Node.js (ESM)
-* **API Gateway:** Express.js (OpenAI API compatible via `/v1/chat/completions`)
-* **Inference Engine:** `node-llama-cpp`
-* **Concurrency:** Node.js `worker_threads`
-
----
-
-## 📂 Project Structure
-
-```text
-open-claw-local-agent/
-├── models/                   # Directory for GGUF models (excluded from git)
-│   └── qwen2.5-7b-instruct-q4_k_m.gguf
-├── src/
-│   ├── server.js             # Main API gateway, routing, and plan orchestrator
-│   └── worker.js             # Worker thread for isolated model inference on GPU
-├── .gitignore                # Ignored files and directories
-└── package.json              # Project dependencies
+⚙️ Quick Start (English)
+Bash
+git clone [https://github.com/Eurodancer26/open-claw-local-agent.git](https://github.com/Eurodancer26/open-claw-local-agent.git)
+cd open-claw-local-agent
+npm install
+# Add your .gguf model into models/ directory
+node src/server.js
