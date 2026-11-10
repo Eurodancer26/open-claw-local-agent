@@ -47,7 +47,6 @@ open-claw-local-agent/
 ---
 
 ## ⚙️ Инструкция по установке и запуску
-<<<<<<< HEAD
 
 ### 1. Клонирование репозитория и установка зависимостей
 ```bash
@@ -92,71 +91,26 @@ Invoke-RestMethod -Uri "http://localhost:3000/v1/chat/completions" `
 ---
 
 # 🌐 English Documentation
-=======
-1. Клонирование репозитория и установка зависимостей
-Bash
-git clone [https://github.com/Eurodancer26/open-claw-local-agent.git](https://github.com/Eurodancer26/open-claw-local-agent.git)
-cd open-claw-local-agent
-npm install
-2. Подготовка модели
-Создай папку models в корне проекта и помести туда файл весов (например, qwen2.5-7b-instruct-q4_k_m.gguf):
 
-Bash
-mkdir models
-# Поместите скачанный .gguf файл внутрь папки models/
-3. Запуск сервера
-Bash
-node src/server.js
-Сервер запустится на http://localhost:3000.
-
----
-
-## 🧪 Тестирование API
-Пример запроса через PowerShell (Invoke-RestMethod):
-
-PowerShell
-$body = @{
-    messages = @(
-        @{ role = "user"; content = "Привет! Напиши короткий план подготовки к запуску проекта." }
-    )
-} | ConvertTo-Json -Depth 3
-
-Invoke-RestMethod -Uri "http://localhost:3000/v1/chat/completions" `
-    -Method Post `
-    -Body $body `
-    -ContentType "application/json"
-
----
-
-## 🌐 English Documentation
-A high-performance local AI orchestrator built with Node.js (ES Modules) and node-llama-cpp, designed to run on consumer hardware with full hardware acceleration on a dedicated GPU.
+A high-performance local AI orchestrator built with **Node.js (ES Modules)** and **`node-llama-cpp`**, designed to run on consumer hardware with full hardware acceleration on a dedicated GPU.
 
 ---
 
 ## 🚀 Architecture Features
-The project implements a two-step "Plan & Execute" pipeline that minimizes hallucinations and effectively solves complex tasks:
 
-Planning Phase: The model analyzes the incoming user request and breaks it down into sequential steps formatted as a structured JSON.
-
-Execution Phase: The orchestrator sequentially passes each step through the language model, aggregating the output into a clean text report for the client.
-
-Thread Isolation (Worker Threads): Heavy inference computations are offloaded to a separate worker thread, preventing any blocking of the main Express server.
+The project implements a two-step **"Plan & Execute"** pipeline that minimizes hallucinations and effectively solves complex tasks:
+1. **Planning Phase:** The model analyzes the incoming user request and breaks it down into sequential steps formatted as a structured JSON.
+2. **Execution Phase:** The orchestrator sequentially passes each step through the language model, aggregating the output into a clean text report for the client.
+3. **Thread Isolation (Worker Threads):** Heavy inference computations are offloaded to a separate worker thread, preventing any blocking of the main Express server.
 
 ---
 
 ## ⚙️ Quick Start (English)
-<<<<<<< HEAD
 
 ```bash
 git clone https://github.com/Eurodancer26/open-claw-local-agent.git
-=======
-Bash
-git clone [https://github.com/Eurodancer26/open-claw-local-agent.git](https://github.com/Eurodancer26/open-claw-local-agent.git)
->>>>>>> b2b52138bcd3dab627dd79e78acb2ddcef5246a2
 cd open-claw-local-agent
 npm install
 # Add your .gguf model into models/ directory
 node src/server.js
-<<<<<<< HEAD
 ```
-=======
