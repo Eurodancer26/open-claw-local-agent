@@ -85,4 +85,8 @@ Invoke-RestMethod -Uri "http://localhost:3000/v1/chat/completions" `
     -Method Post `
     -Body $body `
     -ContentType "application/json"
+<<<<<<< HEAD
 ```
+=======
+```
+>>>>>>> 3f4a220c5713707f1b756509f8d8d3330318c3e7
