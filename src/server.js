@@ -1,24 +1,21 @@
 import express from 'express';
-import { config } from './config/index.js';
-import { initLlamaEngine } from './core/engine.js';
-import apiRouter from './api/routes.js';
+import path from 'path';
+import apiRoutes from './api/routes.js';
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware для работы с JSON
 app.use(express.json());
-app.use('/v1', apiRouter);
 
-async function startServer() {
-    try {
-        console.log("[Server] Предварительная инициализация модели в памяти...");
-        await initLlamaEngine();
+// Раздача статических файлов веб-интерфейса («Vibecoder UI») из папки public
+app.use(express.static(path.join(process.cwd(), 'public')));
 
-        app.listen(config.port, () => {
-            console.log(`[Server] Сервер запущен на http://localhost:${config.port}`);
-        });
-    } catch (error) {
-        console.error("[Server Error] Ошибка запуска:", error);
-        process.exit(1);
-    }
-}
+// Подключаем API роуты совместимости с OpenAI
+app.use('/v1', apiRoutes);
 
-startServer();
+// Запуск сервера
+app.listen(PORT, () => {
+  console.log(`🚀 Сервер запущен на http://localhost:${PORT}`);
+  console.log(`🌐 Веб-интерфейс доступен в браузере по адресу http://localhost:${PORT}`);
+});
