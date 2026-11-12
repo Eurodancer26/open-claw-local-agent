@@ -1,175 +1,96 @@
-import express from 'express';
+import { Router } from 'express';
 import { initLlamaEngine } from '../core/engine.js';
 import { toolsRegistry, getToolsSystemPrompt } from '../tools/registry.js';
 
-const router = express.Router();
+const router = Router();
 
-/**
- * Функция очистки и форматирования ответа шага
- */
-function cleanStepOutput(text) {
-  if (!text) return '';
-  return text
-    .replace(/```(?:json|javascript|js)?\s*[\s\S]*?```/gi, '')
-    .trim();
-}
+router.post('/v1/chat/completions', async (req, res) => {
+  try {
+    const { messages, stream = false } = req.body;
 
-/**
- * Всеядный парсер вызовов инструментов (Tool Call), поддерживающий любые блоки кода
- */
-function parseToolCall(text) {
-  if (!text) return null;
-
-  // 1. Ищем любые JSON-подобные структуры внутри текста или блоков кода
-  const regex = /\{\s*"tool"\s*:\s*"[^"]+"\s*,\s*"args"\s*:\s*\{[\s\S]*?\}\s*\}/g;
-  let match;
-  
-  while ((match = regex.exec(text)) !== null) {
-    try {
-      const parsed = JSON.parse(match[0]);
-      if (parsed.tool && toolsRegistry[parsed.tool]) {
-        return parsed;
-      }
-    } catch (e) {
-      // Пытаемся исправить частые проблемы с неэкранированными переводами строк в строках JSON
-      try {
-        const fixedJson = match[0].replace(/[\n\r]+/g, '\\n');
-        const parsed = JSON.parse(fixedJson);
-        if (parsed.tool && toolsRegistry[parsed.tool]) {
-          return parsed;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({
+        error: {
+          message: 'Поле "messages" должно быть непустым массивом.',
+          type: 'invalid_request_error',
+          code: 400
         }
-      } catch (innerE) {
-        // Продолжаем поиск
-      }
-    }
-  }
-
-  // 2. Дополнительная попытка распарсить весь текст после удаления маркдаун-оберток
-  try {
-    const stripped = text.replace(/```(?:json|javascript|js)?\s*([\s\S]*?)\s*```/gi, '$1').trim();
-    if (stripped.startsWith('{') && stripped.endsWith('}')) {
-      const parsed = JSON.parse(stripped);
-      if (parsed.tool && toolsRegistry[parsed.tool]) {
-        return parsed;
-      }
-    }
-  } catch (e) {}
-
-  return null;
-}
-
-/**
- * Эндпоинт чата с поддержкой SSE-стриминга, дедупликацией, Function Calling и Self-Correction
- */
-router.post('/chat/completions', async (req, res) => {
-  try {
-    const { messages, stream } = req.body;
-    
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'Invalid messages array provided in request body.' });
+      });
     }
 
-    const userPrompt = messages[messages.length - 1].content;
-    const session = await initLlamaEngine();
-    const startTime = Date.now();
+    const userMessage = messages[messages.length - 1].content;
+    const engine = await initLlamaEngine();
 
-    // 1. Фаза планирования (Planner)
-    const planningPrompt = `Ты планировщик задач. Разбей задачу пользователя на логические шаги (от 2 до 3 шагов).
-        ВАЖНО: Пиши план ТОЛЬКО текстовыми пунктами вида "Шаг 1: [описание]". НЕ вызывай никаких инструментов в этой фазе!
-        Задача пользователя: "${userPrompt}"`;
+    // Если запрошен классический JSON-ответ (stream: false)
+    if (!stream) {
+      // Простейший цикл выполнения для не-стримингового запроса
+      const session = await engine.createSession();
+      
+      // Добавляем системный промпт с инструментами
+      const prompt = `${getToolsSystemPrompt()}\n\nЗапрос пользователя: ${userMessage}`;
+      const responseText = await session.prompt(prompt);
 
-    const planResponse = await session.prompt(planningPrompt, {
-      temperature: 0.2,
-      maxTokens: 256
+      return res.json({
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: 'local-agent-model',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: responseText.trim()
+            },
+            finish_reason: 'stop'
+          }
+        ],
+        usage: {
+          prompt_tokens: -1,
+          completion_tokens: -1,
+          total_tokens: -1
+        }
+      });
+    }
+
+    // Режим SSE-стриминга (stream: true) для веб-интерфейса
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const sendSSE = (data) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    sendSSE({
+      choices: [{ delta: { role: 'assistant', content: '📋 Составляю план выполнения задачи...\n' } }]
     });
 
-    const planText = cleanStepOutput(planResponse);
+    const session = await engine.createSession();
+    const prompt = `${getToolsSystemPrompt()}\n\nЗапрос пользователя: ${userMessage}`;
     
-    const stepRegex = /(?:Шаг \d+:|^\d+\.)\s*(.+)/gm;
-    const matches = [...planText.matchAll(stepRegex)];
-    const stepDescriptions = matches.map(m => m[1].trim());
-    const uniqueSteps = [...new Set(stepDescriptions)];
-    const steps = uniqueSteps.length > 0 ? uniqueSteps : [userPrompt];
+    const responseText = await session.prompt(prompt);
 
-    let fullExecutionResult = `### 📋 План выполнения:\n${planText}\n\n### ⚡ Результаты выполнения:\n`;
+    sendSSE({
+      choices: [{ delta: { content: `\n${responseText}\n` } }]
+    });
 
-    if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      const initialChunk = `### 📋 План выполнения:\n${planText}\n\n### ⚡ Результаты выполнения:\n`;
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: initialChunk } }] })}\n\n`);
-
-      // Фаза выполнения шагов
-      for (let i = 0; i < steps.length; i++) {
-        const stepDescription = steps[i];
-        const stepHeader = `\n**Шаг ${i + 1}:** ${stepDescription}\n`;
-        
-        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: stepHeader } }] })}\n\n`);
-        fullExecutionResult += stepHeader;
-
-        const executionPrompt = `${getToolsSystemPrompt()}
-
-        Контекст задачи: "${userPrompt}"
-        Текущий шаг выполнения: "${stepDescription}"
-        ИНСТРУКЦИЯ: Выполни этот конкретный шаг. Если нужен инструмент (например, создание файла через writeFile или запуск через runCommand), верни его в формате JSON внутри блока кода.`;
-
-        const stepResponse = await session.prompt(executionPrompt, {
-          temperature: 0.1,
-          maxTokens: 1024
-        });
-
-        const toolCall = parseToolCall(stepResponse);
-        if (toolCall) {
-          const toolNotice = `\n*(Вызов инструмента: \`${toolCall.tool}\`)*\n`;
-          res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: toolNotice } }] })}\n\n`);
-          fullExecutionResult += toolNotice;
-
-          let toolResult = await toolsRegistry[toolCall.tool].execute(toolCall.args || {});
-          let resultString = `\`\`\`json\n${JSON.stringify(toolResult, null, 2)}\n\`\`\`\n`;
-          
-          res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: resultString } }] })}\n\n`);
-          fullExecutionResult += resultString;
-
-          // Цикл самопроверки (Self-Correction)
-          if (toolCall.tool === 'runCommand' && (toolResult.error || toolResult.stderr)) {
-            const fixPrompt = `В предыдущем шаге команда завершилась с ошибкой:\nОшибка: ${toolResult.error || ''}\nStderr: ${toolResult.stderr || ''}\n\nИсправь код или ошибку, вызвав инструмент writeFile.`;
-            
-            const fixResponse = await session.prompt(fixPrompt, { temperature: 0.1, maxTokens: 1024 });
-            const fixToolCall = parseToolCall(fixResponse);
-            
-            if (fixToolCall && fixToolCall.tool === 'writeFile') {
-              const fixNotice = `\n*(🔄 Самопроверка: исправляем ошибку через \`writeFile\`)*\n`;
-              res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: fixNotice } }] })}\n\n`);
-              fullExecutionResult += fixNotice;
-
-              const fixResult = await toolsRegistry[fixToolCall.tool].execute(fixToolCall.args || {});
-              const fixResultString = `\`\`\`json\n${JSON.stringify(fixResult, null, 2)}\n\`\`\`\n`;
-              
-              res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: fixResultString } }] })}\n\n`);
-              fullExecutionResult += fixResultString;
-            }
-          }
-
-        } else {
-          const cleaned = cleanStepOutput(stepResponse);
-          const codeBlock = `\`\`\`javascript\n${cleaned}\n\`\`\`\n`;
-          
-          res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: codeBlock } }] })}\n\n`);
-          fullExecutionResult += codeBlock;
-        }
-      }
-
-      res.write('data: [DONE]\n\n');
-      return res.end();
-    }
+    res.write('data: [DONE]\n\n');
+    res.end();
 
   } catch (error) {
-    console.error('API Error in /v1/chat/completions:', error);
+    console.error('Ошибка в обработчике /v1/chat/completions:', error);
+    
     if (!res.headersSent) {
-      res.status(500).json({ error: error.message || 'Internal server error.' });
+      return res.status(500).json({
+        error: {
+          message: error.message,
+          type: 'internal_server_error',
+          code: 500
+        }
+      });
     } else {
+      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
       res.end();
     }
   }
