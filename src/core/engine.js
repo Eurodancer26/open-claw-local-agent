@@ -1,33 +1,57 @@
-import { getLlama, LlamaChatSession } from "node-llama-cpp";
-import { config } from "../config/index.js";
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { getLlama, LlamaChatSession } from 'node-llama-cpp';
 
-let llama = null;
-let model = null;
-let context = null;
-let session = null;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
+let instance = null;
+
+class LocalLlamaEngine {
+  constructor(model, context) {
+    this.model = model;
+    this.context = context;
+  }
+
+  /**
+   * Создание новой чат-сессии для работы с моделью
+   */
+  async createSession() {
+    const session = new LlamaChatSession({
+      contextSequence: this.context.getSequence()
+    });
+
+    return {
+      async prompt(text, options = {}) {
+        return await session.prompt(text, options);
+      }
+    };
+  }
+}
+
+/**
+ * Инициализация синглтона LLM-движка (защита от перегрузки VRAM)
+ */
 export async function initLlamaEngine() {
-    if (session) return session;
+  if (instance) {
+    return instance;
+  }
 
-    console.log(`[Engine] Инициализация среды llama.cpp...`);
-    llama = await getLlama();
+  console.log('[Engine] Инициализация среды llama.cpp...');
+  
+  // Получаем проинициализированный экземпляр llama для текущей архитектуры
+  const llama = await getLlama();
 
-    console.log(`[Engine] Загрузка модели из: ${config.modelPath}`);
-    model = await llama.loadModel({
-        modelPath: config.modelPath,
-        gpuLayers: config.gpuLayers
-    });
+  const modelPath = path.join(__dirname, '../../models/qwen2.5-7b-instruct-q4_k_m.gguf');
+  console.log(`[Engine] Загрузка модели из: ${modelPath}`);
 
-    context = await model.createContext({
-        contextSize: config.contextSize
-    });
+  const model = await llama.loadModel({
+    modelPath: modelPath
+  });
 
-    // Создаем сессию с дефолтной последовательностью контекста
-    session = new LlamaChatSession({
-        contextSequence: context.getSequence()
-    });
+  const context = await model.createContext();
+  console.log('[Engine] Модель успешно загружена, оффлоаднута на GPU и готова к работе!');
 
-    console.log("[Engine] Модель успешно загружена, оффлоаднута на GPU и готова к работе!");
-    
-    return session;
+  instance = new LocalLlamaEngine(model, context);
+  return instance;
 }

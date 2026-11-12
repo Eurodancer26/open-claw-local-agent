@@ -1,90 +1,147 @@
-import fs from 'fs';
-import path from 'path';
-import { exec } from 'child_process';
-import util from 'util';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
-const execPromise = util.promisify(exec);
-const WORKSPACE_DIR = process.cwd();
+const execFileAsync = promisify(execFile);
+const WORKSPACE_DIR = await fs.realpath(process.cwd());
+
+/**
+ * Проверка и ограничение пути рабочей директорией (защита от Directory Traversal)
+ */
+function resolveWorkspacePath(filePath) {
+  if (
+    typeof filePath !== 'string' ||
+    !filePath.trim() ||
+    filePath.includes('\0') ||
+    path.isAbsolute(filePath) ||
+    /^[a-zA-Z]:[\\/]/.test(filePath) ||
+    filePath.startsWith('\\\\')
+  ) {
+    throw new Error('Ожидается относительный путь внутри рабочей папки.');
+  }
+
+  const target = path.resolve(WORKSPACE_DIR, filePath);
+  const relative = path.relative(WORKSPACE_DIR, target);
+
+  if (
+    !relative ||
+    relative === '..' ||
+    relative.startsWith('..' + path.sep) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error('Путь должен находиться внутри рабочей папки.');
+  }
+
+  return target;
+}
+
+/**
+ * Защита от симлинков для предотвращения обхода песочницы
+ */
+async function rejectSymlinks(target, { allowMissing = false } = {}) {
+  const relative = path.relative(WORKSPACE_DIR, target);
+  let current = WORKSPACE_DIR;
+
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    try {
+      const info = await fs.lstat(current);
+      if (info.isSymbolicLink()) {
+        throw new Error('Симлинки в путях инструментов запрещены.');
+      }
+    } catch (error) {
+      if (allowMissing && error.code === 'ENOENT') return;
+      throw error;
+    }
+  }
+}
+
+/**
+ * Белый список разрешенных системных команд для runCommand
+ */
+const SAFE_COMMANDS = {
+  'git-status': { file: 'git', args: ['status', '--short'] },
+  'node-version': { file: process.execPath, args: ['--version'] },
+  'run-test': { file: process.execPath, args: ['tests/sandbox/file-utils.test.js'] }
+};
 
 export const toolsRegistry = {
-  // 1. Чтение файла
   readFile: {
-    description: 'Читает содержимое файла по относительному пути.',
-    parameters: {
-      type: 'object',
-      properties: {
-        filePath: { type: 'string', description: 'Путь к файлу относительно корня проекта' }
-      },
-      required: ['filePath']
-    },
     async execute({ filePath }) {
       try {
-        const fullPath = path.join(WORKSPACE_DIR, filePath);
-        if (!fs.existsSync(fullPath)) return { error: `Файл ${filePath} не найден.` };
-        const content = fs.readFileSync(fullPath, 'utf-8');
+        const target = resolveWorkspacePath(filePath);
+        await rejectSymlinks(target);
+        const info = await fs.lstat(target);
+        
+        if (!info.isFile()) {
+          return { error: 'Можно читать только обычные файлы.' };
+        }
+        
+        const content = await fs.readFile(target, 'utf8');
         return { success: true, content };
-      } catch (err) {
-        return { error: err.message };
+      } catch (error) {
+        return { error: error.message };
       }
     }
   },
 
-  // 2. Запись / создание файла
   writeFile: {
-    description: 'Создает или перезаписывает файл с указанным содержимым.',
-    parameters: {
-      type: 'object',
-      properties: {
-        filePath: { type: 'string', description: 'Путь к файлу' },
-        content: { type: 'string', description: 'Текст или код для записи' }
-      },
-      required: ['filePath', 'content']
-    },
     async execute({ filePath, content }) {
       try {
-        const fullPath = path.join(WORKSPACE_DIR, filePath);
-        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-        fs.writeFileSync(fullPath, content, 'utf-8');
+        if (typeof content !== 'string') {
+          return { error: 'Содержимое файла должно быть строкой.' };
+        }
+
+        const target = resolveWorkspacePath(filePath);
+        
+        // Проверяем существующую часть пути до создания директорий
+        await rejectSymlinks(target, { allowMissing: true });
+        
+        // Создаем директории, если их нет
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        
+        // Повторная проверка перед записью (разрешаем отсутствие самого файла)
+        await rejectSymlinks(target, { allowMissing: true });
+        
+        await fs.writeFile(target, content, { encoding: 'utf8' });
         return { success: true, message: `Файл ${filePath} успешно записан.` };
-      } catch (err) {
-        return { error: err.message };
+      } catch (error) {
+        return { error: error.message };
       }
     }
   },
 
-  // 3. Выполнение консольной команды (тесты, скрипты, сборка)
   runCommand: {
-    description: 'Выполняет консольную команду в корне проекта (например, тесты или запуск скриптов).',
-    parameters: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Команда для выполнения (например, node test-stream.js)' }
-      },
-      required: ['command']
-    },
-    async execute({ command }) {
+    async execute({ commandId }) {
+      const command = SAFE_COMMANDS[commandId];
+      if (!command) {
+        return { error: `Команда не разрешена или не найдена в белом списке. Доступные ID: ${Object.keys(SAFE_COMMANDS).join(', ')}` };
+      }
+
       try {
-        // Базовые ограничения безопасности
-        if (command.includes('rm -rf /') || command.includes('del /s /q c:\\')) {
-          return { error: 'Эта команда запрещена из соображений безопасности.' };
-        }
-        const { stdout, stderr } = await execPromise(command, { cwd: WORKSPACE_DIR, timeout: 15000 });
+        const { stdout, stderr } = await execFileAsync(
+          command.file,
+          command.args,
+          {
+            cwd: WORKSPACE_DIR,
+            timeout: 15_000,
+            maxBuffer: 1024 * 1024,
+            windowsHide: true
+          }
+        );
         return { success: true, stdout, stderr };
-      } catch (err) {
-        return { error: err.message, stderr: err.stderr };
+      } catch (error) {
+        return { error: error.message, stderr: error.stderr };
       }
     }
   }
 };
 
-/**
- * Возвращает текстовое описание инструментов для системного промта модели
- */
 export function getToolsSystemPrompt() {
-  let prompt = "У тебя есть доступ к следующим инструментам (Function Calling):\n";
-  for (const [name, tool] of Object.entries(toolsRegistry)) {
-    prompt += `- Инструмент: "${name}"\n  Описание: ${tool.description}\n  Параметры: ${JSON.stringify(tool.parameters)}\n`;
-  }
-  prompt += `\nЕсли тебе нужно вызвать инструмент, верни строго JSON-объект в формате:\n\`\`\`json\n{"tool": "имя_инструмента", "args": { "параметр": "значение" }}\n\`\`\`\n`;
-  return prompt;
+  return `Доступные инструменты:
+- readFile: { "filePath": "относительный путь" }
+- writeFile: { "filePath": "относительный путь", "content": "код" }
+- runCommand: { "commandId": "id из белого списка (${Object.keys(SAFE_COMMANDS).join(', ')})" }
+Используй строго формат JSON в блоке \`\`\`json для вызова инструментов.`;
 }

@@ -1,21 +1,26 @@
 import express from 'express';
-import path from 'path';
-import apiRoutes from './api/routes.js';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import routes from './api/routes.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware для работы с JSON
+// Middleware для обработки JSON и статики
 app.use(express.json());
+app.use(express.static(path.join(__dirname, '../public')));
 
-// Раздача статических файлов веб-интерфейса («Vibecoder UI») из папки public
-app.use(express.static(path.join(process.cwd(), 'public')));
+// Подключаем API-маршруты в корень (чтобы работал путь /v1/chat/completions)
+app.use(routes);
 
-// Подключаем API роуты совместимости с OpenAI
-app.use('/v1', apiRoutes);
+// Запуск сервера, если файл запущен напрямую
+if (process.argv[1] === __filename) {
+  app.listen(PORT, () => {
+    console.log(`🚀 Сервер запущен на http://localhost:${PORT}`);
+  });
+}
 
-// Запуск сервера
-app.listen(PORT, () => {
-  console.log(`🚀 Сервер запущен на http://localhost:${PORT}`);
-  console.log(`🌐 Веб-интерфейс доступен в браузере по адресу http://localhost:${PORT}`);
-});
+export default app;
