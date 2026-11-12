@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Open Claw - Vibecoder UI</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #0f1117;
+      color: #e1e4e8;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    header {
+      background-color: #161b22;
+      padding: 15px 20px;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header h1 {
+      font-size: 1.2rem;
+      color: #58a6ff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .status-badge {
+      background-color: #238636;
+      color: #fff;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 0.8rem;
+    }
+    .chat-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+    }
+    .message {
+      max-width: 80%;
+      padding: 12px 16px;
+      border-radius: 8px;
+      line-height: 1.5;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+    .message.user {
+      background-color: #1f6feb;
+      color: #fff;
+      align-self: flex-end;
+    }
+    .message.assistant {
+      background-color: #161b22;
+      border: 1px solid #30363d;
+      color: #e1e4e8;
+      align-self: flex-start;
+      font-family: monospace;
+      font-size: 0.9rem;
+    }
+    .input-container {
+      background-color: #161b22;
+      padding: 15px 20px;
+      border-top: 1px solid #30363d;
+      display: flex;
+      gap: 10px;
+    }
+    textarea {
+      flex: 1;
+      background-color: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 10px;
+      color: #e1e4e8;
+      font-size: 1rem;
+      resize: none;
+      height: 50px;
+      font-family: inherit;
+    }
+    textarea:focus {
+      outline: none;
+      border-color: #58a6ff;
+    }
+    button {
+      background-color: #238636;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 0 20px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background-color: #2ea043;
+    }
+    button:disabled {
+      background-color: #30363d;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1><span>🤖</span> Open Claw Local Agent (Intel Arc A580)</h1>
+    <div class="status-badge" id="statusBadge">Готов к работе</div>
+  </header>
+
+  <div class="chat-container" id="chatContainer">
+    <div class="message assistant">Привет! Я твой локальный агент. Напиши задачу, и я разобью её на шаги, выполню в песочнице и выведу результат.</div>
+  </div>
+
+  <div class="input-container">
+    <textarea id="userInput" placeholder="Введите задачу для агента... (например: Создай файл test.js и запусти его)" autofocus></textarea>
+    <button id="sendBtn" onclick="sendMessage()">Отправить</button>
+  </div>
+
+  <script>
+    const chatContainer = document.getElementById('chatContainer');
+    const userInput = document.getElementById('userInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const statusBadge = document.getElementById('statusBadge');
+
+    userInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    async function sendMessage() {
+      const text = userInput.value.trim();
+      if (!text) return;
+
+      userInput.value = '';
+      userInput.disabled = true;
+      sendBtn.disabled = true;
+      statusBadge.textContent = 'Думает и планирует...';
+      statusBadge.style.backgroundColor = '#9e6a03';
+
+      // Добавляем сообщение пользователя
+      appendMessage(text, 'user');
+
+      // Создаем блок для ответа ассистента
+      const assistantMsgDiv = appendMessage('', 'assistant');
+
+      try {
+        const response = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: text }],
+            stream: true
+          })
+        });
+
+        if (!response.ok) throw new Error('Ошибка соединения с сервером');
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop(); // Оставляем неполный чанк в буфере
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const dataStr = line.replace('data: ', '').trim();
+              if (dataStr === '[DONE]') break;
+
+              try {
+                const parsed = JSON.parse(dataStr);
+                const delta = parsed.choices?.[0]?.delta?.content;
+                if (delta) {
+                  assistantMsgDiv.textContent += delta;
+                  chatContainer.scrollTop = chatContainer.scrollHeight;
+                }
+              } catch (e) {
+                // Игнорируем ошибки парсинга неполных чанков
+              }
+            }
+          }
+        }
+      } catch (err) {
+        assistantMsgDiv.textContent += `\n❌ Ошибка: ${err.message}`;
+      } finally {
+        userInput.disabled = false;
+        sendBtn.disabled = false;
+        userInput.focus();
+        statusBadge.textContent = 'Готов к работе';
+        statusBadge.style.backgroundColor = '#238636';
+      }
+    }
+
+    function appendMessage(text, sender) {
+      const div = document.createElement('div');
+      div.className = `message ${sender}`;
+      div.textContent = text;
+      chatContainer.appendChild(div);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+      return div;
+    }
+  </script>
+</body>
+</html>
