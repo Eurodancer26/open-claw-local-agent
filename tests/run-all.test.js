@@ -28,7 +28,6 @@ async function waitForServer(url, timeoutMs = 15000) {
 describe('Open-Claw Local Agent — Единый набор тестов', () => {
   before(async () => {
     console.log('🚀 Запуск фонового сервера для тестов...');
-    // Используем 'inherit', чтобы все логи и ошибки сервера выводились в терминал
     serverProcess = spawn(process.execPath, ['src/server.js'], {
       stdio: 'inherit',
       env: { ...process.env, PORT: '3000' }
@@ -45,20 +44,40 @@ describe('Open-Claw Local Agent — Единый набор тестов', () =>
     }
   });
 
-  it('1. Проверка безопасности песочницы (блокировка Directory Traversal и неразрешенных команд)', async () => {
+  it('1. Комплексная проверка безопасности песочницы (Directory Traversal, симлинки и инъекции команд)', async () => {
     const { toolsRegistry } = await import('../src/tools/registry.js');
 
-    const readAttempt = await toolsRegistry.readFile.execute({ filePath: '../package.json' });
-    assert.ok(readAttempt.error, 'Должна вернуться ошибка при попытке чтения выше корня');
+    // 1.1. Блокировка Directory Traversal
+    const readAttempt = await toolsRegistry.readFile.execute({ filePath: '../../package.json' });
+    assert.equal(readAttempt.success, false, 'Доступ за пределы рабочей директории должен быть запрещен');
 
     const writeAttempt = await toolsRegistry.writeFile.execute({
       filePath: '../../hack.txt',
       content: 'test'
     });
-    assert.ok(writeAttempt.error, 'Должна вернуться ошибка при попытке записи выше корня');
+    assert.equal(writeAttempt.success, false, 'Запись за пределы рабочей директории должна быть запрещена');
 
-    const cmdAttempt = await toolsRegistry.runCommand.execute({ commandId: 'rm -rf /' });
-    assert.ok(cmdAttempt.error, 'Должна вернуться ошибка при попытке вызова команды вне белого списка');
+    // 1.2. Блокировка символических ссылок (symlinks), ведущих наружу
+    const targetOutside = path.resolve('../package.json');
+    const symlinkPath = path.resolve('tests/sandbox/malicious-link');
+    try {
+      await fs.symlink(targetOutside, symlinkPath, 'file').catch(() => {});
+      const linkReadAttempt = await toolsRegistry.readFile.execute({ filePath: 'tests/sandbox/malicious-link' });
+      assert.equal(linkReadAttempt.success, false, 'Чтение через симлинк за пределы песочницы должно блокироваться');
+    } finally {
+      await fs.rm(symlinkPath, { force: true }).catch(() => {});
+    }
+
+    // 1.3. Безопасность выполнения команд (защита от неразрешенных команд и инъекций)
+    const cmdAttempt1 = await toolsRegistry.runCommand.execute({ commandId: 'rm -rf /' });
+    assert.equal(cmdAttempt1.success, false, 'Команды вне белого списка должны блокироваться');
+
+    const cmdAttempt2 = await toolsRegistry.runCommand.execute({ commandId: 'node-version && echo hacked' });
+    if (cmdAttempt2.success) {
+      assert.equal(cmdAttempt2.stdout.includes('hacked'), false, 'Инъекции через шелл-разделители должны быть исключены');
+    } else {
+      assert.ok(cmdAttempt2.error, 'Составные или неразрешенные команды должны отклоняться');
+    }
   });
 
   it('2. Проверка работы инструментов внутри tests/sandbox/', async () => {
@@ -75,7 +94,6 @@ describe('Open-Claw Local Agent — Единый набор тестов', () =>
     assert.equal(readRes.success, true, `Ошибка чтения: ${readRes.error}`);
     assert.equal(readRes.content, 'Hello from automated test!');
 
-    // Удаляем временный файл после проверки
     await fs.rm(path.resolve(testFile), { force: true });
   });
 
