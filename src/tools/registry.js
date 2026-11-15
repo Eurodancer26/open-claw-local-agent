@@ -9,38 +9,56 @@ const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Определяем безопасную рабочую директорию (песочницу) проекта
+// Абсолютный путь к рабочей директории (корню проекта)
 const WORKSPACE_DIR = path.resolve(__dirname, '../../');
 
 /**
- * Надежная проверка пути с защитой от Directory Traversal и симлинков, ведущих наружу
+ * Надежная проверка пути с защитой от Directory Traversal, префиксных обходов и симлинков
  */
 async function resolveWorkspacePath(userInputPath) {
-  // Нормализуем путь относительно воркспейса
   const resolved = path.resolve(WORKSPACE_DIR, userInputPath);
 
-  // Проверяем, что путь физически начинается с рабочей директории
-  if (!resolved.startsWith(WORKSPACE_DIR)) {
+  // 1. Проверка границ через path.relative (защита от /project vs /project-other)
+  const relative = path.relative(WORKSPACE_DIR, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error('Доступ запрещен: выход за пределы рабочей директории.');
   }
 
+  // 2. Покомпонентная проверка каждого сегмента пути на наличие симлинков / junctions
+  const segments = relative.split(path.sep).filter(Boolean);
+  let currentPath = WORKSPACE_DIR;
+
+  for (const segment of segments) {
+    currentPath = path.join(currentPath, segment);
+    try {
+      const stats = await fs.lstat(currentPath);
+      if (stats.isSymbolicLink()) {
+        const realTarget = await fs.realpath(currentPath);
+        const targetRelative = path.relative(WORKSPACE_DIR, realTarget);
+        if (targetRelative.startsWith('..') || path.isAbsolute(targetRelative)) {
+          throw new Error('Доступ запрещен: символическая ссылка ведет за пределы песочницы.');
+        }
+      }
+    } catch (err) {
+      if (err.message && err.message.includes('Доступ запрещен')) {
+        throw err;
+      }
+      // Компонент еще не существует — выходим из цикла проверки существующих частей
+      break;
+    }
+  }
+
+  // 3. Финальная проверка реального физического пути (если объект уже существует)
   try {
-    // Проверяем реальный физический путь (защита от симлинков)
     const realPath = await fs.realpath(resolved);
-    if (!realPath.startsWith(WORKSPACE_DIR)) {
-      throw new Error('Доступ запрещен: символическая ссылка ведет за пределы песочницы.');
+    const realRelative = path.relative(WORKSPACE_DIR, realPath);
+    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+      throw new Error('Доступ запрещен: целевой объект ведет за пределы песочницы.');
     }
     return realPath;
   } catch (err) {
-    // Если файл еще не существует (например, для writeFile), проверяем родительскую директорию
-    const parsedPath = path.parse(resolved);
-    try {
-      const realParentPath = await fs.realpath(parsedPath.dir);
-      if (!realParentPath.startsWith(WORKSPACE_DIR)) {
-        throw new Error('Доступ запрещен: родительская директория вне песочницы.');
-      }
-    } catch {
-      // Если родительская папка тоже не найдена, возвращаем базовый разрешенный путь
+    if (err.message && err.message.includes('Доступ запрещен')) {
+      throw err;
     }
     return resolved;
   }
@@ -107,17 +125,15 @@ export const toolsRegistry = {
       required: ['commandId']
     },
     async execute({ commandId }) {
-      // Проверяем строгое соответствие ключу белого списка (исключаем любые shell-инъекции и разделители вроде &&, ;)
       const allowed = SAFE_COMMANDS[commandId];
       if (!allowed) {
-        return { 
-          success: false, 
-          error: `Команда "${commandId}" не разрешена политикой безопасности или не найдена в белом списке.` 
+        return {
+          success: false,
+          error: `Команда "${commandId}" не разрешена политикой безопасности или не найдена в белом списке.`
         };
       }
 
       try {
-        // Используем execFile без вызова системного shell, что полностью исключает инъекции
         const { stdout, stderr } = await execFileAsync(allowed.cmd, allowed.args, {
           cwd: WORKSPACE_DIR,
           timeout: 10000
