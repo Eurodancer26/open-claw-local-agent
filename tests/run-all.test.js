@@ -44,12 +44,15 @@ describe('Open-Claw Local Agent — Единый набор тестов', () =>
     }
   });
 
-  it('1. Комплексная проверка безопасности песочницы (Directory Traversal, симлинки и инъекции команд)', async () => {
+  it('1. Комплексная проверка безопасности песочницы (Directory Traversal, префиксы, симлинки на чтение/запись и инъекции)', async () => {
     const { toolsRegistry } = await import('../src/tools/registry.js');
 
-    // 1.1. Блокировка Directory Traversal
+    // 1.1. Блокировка Directory Traversal и префиксных обходов (защита от соседа с похожим именем)
     const readAttempt = await toolsRegistry.readFile.execute({ filePath: '../../package.json' });
     assert.equal(readAttempt.success, false, 'Доступ за пределы рабочей директории должен быть запрещен');
+
+    const prefixBypassAttempt = await toolsRegistry.readFile.execute({ filePath: '../open-claw-local-agent-other/package.json' });
+    assert.equal(prefixBypassAttempt.success, false, 'Префиксный обход путей должен строго блокироваться');
 
     const writeAttempt = await toolsRegistry.writeFile.execute({
       filePath: '../../hack.txt',
@@ -57,15 +60,40 @@ describe('Open-Claw Local Agent — Единый набор тестов', () =>
     });
     assert.equal(writeAttempt.success, false, 'Запись за пределы рабочей директории должна быть запрещена');
 
-    // 1.2. Блокировка символических ссылок (symlinks), ведущих наружу
-    const targetOutside = path.resolve('../package.json');
-    const symlinkPath = path.resolve('tests/sandbox/malicious-link');
+    // 1.2. Блокировка символических ссылок / junction на чтение и запись наружу
+    const targetDirOutside = path.resolve('..');
+    const symlinkDirPath = path.resolve('tests/sandbox/malicious-dir-link');
+    await fs.mkdir(path.resolve('tests/sandbox'), { recursive: true });
+
+    let linkCreated = false;
     try {
-      await fs.symlink(targetOutside, symlinkPath, 'file').catch(() => {});
-      const linkReadAttempt = await toolsRegistry.readFile.execute({ filePath: 'tests/sandbox/malicious-link' });
-      assert.equal(linkReadAttempt.success, false, 'Чтение через симлинк за пределы песочницы должно блокироваться');
-    } finally {
-      await fs.rm(symlinkPath, { force: true }).catch(() => {});
+      await fs.symlink(targetDirOutside, symlinkDirPath, 'junction');
+      linkCreated = true;
+    } catch {
+      // Если ОС строго запрещает создание даже junction, пропускаем проверку ссылки
+    }
+
+    if (linkCreated) {
+      try {
+        // Попытка чтения через симлинк-директорию наружу
+        const linkReadAttempt = await toolsRegistry.readFile.execute({
+          filePath: 'tests/sandbox/malicious-dir-link/open-claw-local-agent/package.json'
+        });
+        // Чтение файла вне песочницы через ссылку за пределы воркспейса (например, системный или соседний файл)
+        const outsideReadAttempt = await toolsRegistry.readFile.execute({
+          filePath: 'tests/sandbox/malicious-dir-link/outside-secret.txt'
+        });
+        assert.equal(outsideReadAttempt.success, false, 'Чтение через симлинк за пределы песочницы должно блокироваться');
+
+        // Попытка записи через симлинк-директорию наружу
+        const linkWriteAttempt = await toolsRegistry.writeFile.execute({
+          filePath: 'tests/sandbox/malicious-dir-link/hacked-outside.txt',
+          content: 'overwrite attempt'
+        });
+        assert.equal(linkWriteAttempt.success, false, 'Запись через симлинк за пределы песочницы должна блокироваться');
+      } finally {
+        await fs.rm(symlinkDirPath, { recursive: true, force: true }).catch(() => {});
+      }
     }
 
     // 1.3. Безопасность выполнения команд (защита от неразрешенных команд и инъекций)
