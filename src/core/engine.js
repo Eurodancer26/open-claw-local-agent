@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs/promises';
 import { getLlama, LlamaChatSession } from 'node-llama-cpp';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,7 +31,7 @@ class LocalLlamaEngine {
 }
 
 /**
- * Инициализация синглтона LLM-движка (защита от перегрузки VRAM)
+ * Инициализация синглтона LLM-движка с проверкой окружения и защитой VRAM
  */
 export async function initLlamaEngine() {
   if (instance) {
@@ -38,11 +39,22 @@ export async function initLlamaEngine() {
   }
 
   console.log('[Engine] Инициализация среды llama.cpp...');
-  
+
+  const modelPath = path.join(__dirname, '../../models/qwen2.5-7b-instruct-q4_k_m.gguf');
+
+  // Строгая валидация окружения: проверяем наличие файла модели перед загрузкой
+  try {
+    await fs.access(modelPath);
+  } catch {
+    throw new Error(
+      `[Engine] Критическая ошибка: Файл модели не найден по пути:\n  -> ${modelPath}\n` +
+      `Пожалуйста, убедитесь, что GGUF-модель помещена в директорию models/ перед запуском сервера или тестов.`
+    );
+  }
+
   // Получаем проинициализированный экземпляр llama для текущей архитектуры
   const llama = await getLlama();
 
-  const modelPath = path.join(__dirname, '../../models/qwen2.5-7b-instruct-q4_k_m.gguf');
   console.log(`[Engine] Загрузка модели из: ${modelPath}`);
 
   const model = await llama.loadModel({
