@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test tests/run-all.test.js",
+    "test": "node --test",
     "test:llm": "cross-env RUN_LLM_TESTS=true node --test tests/run-all.test.js"
   },
   "keywords": [],
