@@ -1,151 +1,118 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Абсолютный путь к рабочей директории (корню проекта)
-const WORKSPACE_DIR = path.resolve(__dirname, '../../');
+const WORKSPACE_ROOT = path.resolve();
 
 /**
- * Надежная проверка пути с защитой от Directory Traversal, префиксных обходов и симлинков
+ * Строгая проверка безопасности пути (защита от Directory Traversal, префиксов и симлинков)
  */
-async function resolveWorkspacePath(userInputPath) {
-  const resolved = path.resolve(WORKSPACE_DIR, userInputPath);
+async function resolveSafePath(userPath) {
+  if (!userPath || typeof userPath !== 'string') {
+    throw new Error('Некорректный путь: путь должен быть непустой строкой.');
+  }
 
-  // 1. Проверка границ через path.relative (защита от /project vs /project-other)
-  const relative = path.relative(WORKSPACE_DIR, resolved);
+  const absoluteTarget = path.resolve(WORKSPACE_ROOT, userPath);
+  const relative = path.relative(WORKSPACE_ROOT, absoluteTarget);
+
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    throw new Error('Доступ запрещен: выход за пределы рабочей директории.');
+    throw new Error('Нарушение безопасности: выход за пределы рабочей директории запрещен.');
   }
 
-  // 2. Покомпонентная проверка каждого сегмента пути на наличие симлинков / junctions
-  const segments = relative.split(path.sep).filter(Boolean);
-  let currentPath = WORKSPACE_DIR;
-
-  for (const segment of segments) {
-    currentPath = path.join(currentPath, segment);
-    try {
-      const stats = await fs.lstat(currentPath);
-      if (stats.isSymbolicLink()) {
-        const realTarget = await fs.realpath(currentPath);
-        const targetRelative = path.relative(WORKSPACE_DIR, realTarget);
-        if (targetRelative.startsWith('..') || path.isAbsolute(targetRelative)) {
-          throw new Error('Доступ запрещен: символическая ссылка ведет за пределы песочницы.');
-        }
-      }
-    } catch (err) {
-      if (err.message && err.message.includes('Доступ запрещен')) {
-        throw err;
-      }
-      // Компонент еще не существует — выходим из цикла проверки существующих частей
-      break;
-    }
-  }
-
-  // 3. Финальная проверка реального физического пути (если объект уже существует)
   try {
-    const realPath = await fs.realpath(resolved);
-    const realRelative = path.relative(WORKSPACE_DIR, realPath);
-    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
-      throw new Error('Доступ запрещен: целевой объект ведет за пределы песочницы.');
+    const realWorkspace = await fs.realpath(WORKSPACE_ROOT);
+    const realTargetDir = await fs.realpath(path.dirname(absoluteTarget));
+    const realTargetFull = path.join(realTargetDir, path.basename(absoluteTarget));
+
+    const relReal = path.relative(realWorkspace, realTargetFull);
+    if (relReal.startsWith('..') || path.isAbsolute(relReal)) {
+      throw new Error('Нарушение безопасности: попытка обхода через символические ссылки или junction.');
     }
-    return realPath;
+
+    return absoluteTarget;
   } catch (err) {
-    if (err.message && err.message.includes('Доступ запрещен')) {
-      throw err;
+    if (err.code === 'ENOENT') {
+      const parentDir = path.dirname(absoluteTarget);
+      try {
+        const realWorkspace = await fs.realpath(WORKSPACE_ROOT);
+        const realParent = await fs.realpath(parentDir);
+        const relRealParent = path.relative(realWorkspace, realParent);
+        if (relRealParent.startsWith('..') || path.isAbsolute(relRealParent)) {
+          throw new Error('Нарушение безопасности: родительская директория находится вне песочницы.');
+        }
+        return absoluteTarget;
+      } catch (parentErr) {
+        throw new Error(`Ошибка проверки родительской директории: ${parentErr.message}`);
+      }
     }
-    return resolved;
+    throw err;
   }
 }
 
-/**
- * Белый список разрешенных команд для инструмента runCommand
- */
 const SAFE_COMMANDS = {
-  'node-version': { cmd: process.execPath, args: ['-v'] },
-  'npm-version': { cmd: 'npm', args: ['-v'] }
+  'node-version': ['-e', 'console.log(process.version)'],
+  'npm-version': ['-v'],
+  'dir-list': ['-la']
 };
 
 export const toolsRegistry = {
   readFile: {
-    description: 'Чтение файла из рабочей директории с проверкой безопасности',
-    parameters: {
-      type: 'object',
-      properties: {
-        filePath: { type: 'string', description: 'Путь к файлу относительно корня проекта' }
-      },
-      required: ['filePath']
-    },
-    async execute({ filePath }) {
+    description: 'Читает содержимое файла. Аргументы: { "filePath": "путь/к/файлу" } (также поддерживается "path")',
+    async execute(args) {
       try {
-        const safePath = await resolveWorkspacePath(filePath);
+        const targetPath = args.filePath || args.path;
+        const safePath = await resolveSafePath(targetPath);
         const content = await fs.readFile(safePath, 'utf8');
         return { success: true, content };
-      } catch (error) {
-        return { success: false, error: error.message };
+      } catch (err) {
+        return { success: false, error: err.message };
       }
     }
   },
 
   writeFile: {
-    description: 'Запись файла в рабочую директорию с проверкой безопасности',
-    parameters: {
-      type: 'object',
-      properties: {
-        filePath: { type: 'string', description: 'Путь к файлу' },
-        content: { type: 'string', description: 'Содержимое файла' }
-      },
-      required: ['filePath', 'content']
-    },
-    async execute({ filePath, content }) {
+    description: 'Записывает текст в файл. Аргументы: { "filePath": "путь/к/файлу", "content": "текст" } (также поддерживается "path")',
+    async execute(args) {
       try {
-        const safePath = await resolveWorkspacePath(filePath);
+        const targetPath = args.filePath || args.path;
+        const safePath = await resolveSafePath(targetPath);
         await fs.mkdir(path.dirname(safePath), { recursive: true });
-        await fs.writeFile(safePath, content, 'utf8');
-        return { success: true, message: `Файл успешно записан: ${filePath}` };
-      } catch (error) {
-        return { success: false, error: error.message };
+        await fs.writeFile(safePath, args.content || '', 'utf8');
+        return { success: true, message: `Файл успешно записан: ${targetPath}` };
+      } catch (err) {
+        return { success: false, error: err.message };
       }
     }
   },
 
   runCommand: {
-    description: 'Безопасное выполнение разрешенных системных команд из белого списка',
-    parameters: {
-      type: 'object',
-      properties: {
-        commandId: { type: 'string', description: 'Идентификатор команды из белого списка' }
-      },
-      required: ['commandId']
-    },
-    async execute({ commandId }) {
-      const allowed = SAFE_COMMANDS[commandId];
-      if (!allowed) {
-        return {
-          success: false,
-          error: `Команда "${commandId}" не разрешена политикой безопасности или не найдена в белом списке.`
-        };
-      }
-
+    description: 'Выполняет разрешенную команду из белого списка. Аргументы: { "commandId": "node-version" }',
+    async execute(args) {
       try {
-        const { stdout, stderr } = await execFileAsync(allowed.cmd, allowed.args, {
-          cwd: WORKSPACE_DIR,
-          timeout: 10000
-        });
+        const cmdId = args.commandId;
+        if (!SAFE_COMMANDS[cmdId]) {
+          return { success: false, error: `Команда "${cmdId}" не разрешена в белом списке.` };
+        }
+        const [executable, ...defaultArgs] = cmdId === 'node-version' ? [process.execPath, '-e', 'console.log(process.version)'] : ['node', SAFE_COMMANDS[cmdId]];
+        
+        const { stdout, stderr } = await execFileAsync(process.execPath, SAFE_COMMANDS[cmdId]);
         return { success: true, stdout, stderr };
-      } catch (error) {
-        return { success: false, error: error.message };
+      } catch (err) {
+        return { success: false, error: err.message };
       }
     }
   }
 };
 
+/**
+ * Возвращает системный промпт с описанием инструментов для агента
+ */
 export function getToolsSystemPrompt() {
-  return `Ты — локальный AI-агент. У тебя есть инструменты для работы с файлами и безопасными системными командами. Всегда строго соблюдай правила безопасности песочницы.`;
+  let prompt = 'Ты — автономный ИИ-агент «Конструкт АИ». У тебя есть следующие инструменты:\n\n';
+  for (const [name, tool] of Object.entries(toolsRegistry)) {
+    prompt += `- **${name}**: ${tool.description}\n`;
+  }
+  return prompt;
 }

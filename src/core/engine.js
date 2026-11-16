@@ -31,7 +31,7 @@ class LocalLlamaEngine {
 }
 
 /**
- * Инициализация синглтона LLM-движка с проверкой окружения и защитой VRAM
+ * Инициализация синглтона LLM-движка с проверкой окружения и поддержкой мульти-последовательностей
  */
 export async function initLlamaEngine() {
   if (instance) {
@@ -42,7 +42,6 @@ export async function initLlamaEngine() {
 
   const modelPath = path.join(__dirname, '../../models/qwen2.5-7b-instruct-q4_k_m.gguf');
 
-  // Строгая валидация окружения: проверяем наличие файла модели перед загрузкой
   try {
     await fs.access(modelPath);
   } catch {
@@ -52,16 +51,18 @@ export async function initLlamaEngine() {
     );
   }
 
-  // Получаем проинициализированный экземпляр llama для текущей архитектуры
   const llama = await getLlama();
-
   console.log(`[Engine] Загрузка модели из: ${modelPath}`);
 
   const model = await llama.loadModel({
     modelPath: modelPath
   });
 
-  const context = await model.createContext();
+  // Выделяем 4 последовательности в контексте для предотвращения ошибки "No sequences left"
+  const context = await model.createContext({
+    sequences: 4
+  });
+
   console.log('[Engine] Модель успешно загружена, оффлоаднута на GPU и готова к работе!');
 
   instance = new LocalLlamaEngine(model, context);
