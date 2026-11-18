@@ -1,174 +1,332 @@
 import { Router } from 'express';
-import { initLlamaEngine } from '../core/engine.js';
-import { getToolsSystemPrompt } from '../tools/registry.js';
+import { getLlama, LlamaChatSession } from 'node-llama-cpp';
+import path from 'path';
+import { getToolsSystemPrompt, sandboxConfig } from '../tools/registry.js';
 import { executePlan } from '../core/executor.js';
+import { initMind, updateMindState, pushRecursiveThought, getMindContextSummary } from '../core/recursiveMind.js';
+import { gpuMutex } from '../core/mutex.js';
+import { ExecutionTracer } from '../core/reporter.js';
 
 const router = Router();
 
-router.post('/v1/chat/completions', async (req, res) => {
-  let session = null;
+let llamaInstance = null;
+let modelInstance = null;
+let contextInstance = null;
+let persistentSession = null;
+let lastActiveMode = null; // Для отслеживания смены режима и сброса кэша сессии
+
+async function getPersistentSession(forceReset = false) {
+  if (!llamaInstance) {
+    llamaInstance = await getLlama();
+    const modelPath = path.resolve(process.cwd(), 'models', 'qwen2.5-7b-instruct-q4_k_m.gguf');
+    modelInstance = await llamaInstance.loadModel({ modelPath });
+    
+    contextInstance = await modelInstance.createContext({
+      sequences: 4
+    });
+  }
+
+  const currentModeStr = sandboxConfig.strictDefault ? 'strict' : 'free';
+  if (forceReset || !persistentSession || lastActiveMode !== currentModeStr) {
+    persistentSession = new LlamaChatSession({
+      contextSequence: contextInstance.getSequence()
+    });
+    lastActiveMode = currentModeStr;
+  }
+
+  return persistentSession;
+}
+
+/**
+ * Неубиваемый парсер JSON-плана.
+ */
+function safeParseJsonPayload(rawText) {
+  if (!rawText || typeof rawText !== 'string') return null;
+
+  let cleaned = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+  const firstBracket = cleaned.indexOf('[');
+  const lastBracket = cleaned.lastIndexOf(']');
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+
+  let candidate = '';
+  if (firstBracket !== -1 && lastBracket > firstBracket && (firstBrace === -1 || firstBracket < firstBrace)) {
+    candidate = cleaned.slice(firstBracket, lastBracket + 1);
+  } else if (firstBrace !== -1 && lastBrace > firstBrace) {
+    candidate = cleaned.slice(firstBrace, lastBrace + 1);
+  } else {
+    return null;
+  }
+
   try {
-    const { messages, stream = false } = req.body;
+    return JSON.parse(candidate);
+  } catch (_) {}
+
+  const withoutTrailingCommas = candidate.replace(/,\s*([}\]])/g, '$1');
+  try {
+    return JSON.parse(withoutTrailingCommas);
+  } catch (_) {}
+
+  try {
+    const repaired = withoutTrailingCommas.replace(
+      /"(description|content|filePath|path|commandId)"\s*:\s*"([\s\S]*?)"(?=\s*,\s*"[a-zA-Z0-9_]+"|\s*})/g,
+      (_, key, val) => {
+        const safeVal = val
+          .replace(/\\"/g, '__ESCAPED_QUOTE__')
+          .replace(/"/g, '\\"')
+          .replace(/__ESCAPED_QUOTE__/g, '\\"')
+          .replace(/\r?\n/g, '\\n');
+        return `"${key}": "${safeVal}"`;
+      }
+    );
+    return JSON.parse(repaired);
+  } catch (_) {}
+
+  try {
+    const superRepaired = withoutTrailingCommas.replace(/"description"\s*:\s*"([^"]*)"/g, (_, desc) => {
+      const cleanDesc = desc.replace(/"/g, "'");
+      return `"description": "${cleanDesc}"`;
+    });
+    return JSON.parse(superRepaired);
+  } catch (_) {}
+
+  return null;
+}
+
+function extractActionPlan(modelResponse) {
+  const parsed = safeParseJsonPayload(modelResponse);
+  if (!parsed) return [];
+
+  if (Array.isArray(parsed)) {
+    return parsed.filter(item => item && typeof item === 'object' && typeof item.tool === 'string');
+  }
+
+  if (typeof parsed === 'object' && typeof parsed.tool === 'string') {
+    return [parsed];
+  }
+
+  return [];
+}
+
+async function askModelToFixStep(step, errorMessage, session, tracer) {
+  tracer.log(
+    'routes.js',
+    'askModelToFixStep',
+    'RETRY',
+    `Запрос самокоррекции. Ошибка: ${errorMessage}`,
+    JSON.stringify(step)
+  );
+
+  const fixPrompt = `Ошибка выполнения шага: "${errorMessage}".
+Исходный шаг: ${JSON.stringify(step)}
+Верни СТРОГО JSON-объект формата без лишнего текста:
+{ "tool": "writeFile", "arguments": { "filePath": "...", "content": "..." } }
+Твой ответ:`;
+
+  await gpuMutex.acquire();
+  try {
+    const rawFix = await session.prompt(fixPrompt);
+    const parsedFix = safeParseJsonPayload(rawFix);
+    if (parsedFix && typeof parsedFix === 'object' && !Array.isArray(parsedFix)) {
+      tracer.log('routes.js', 'askModelToFixStep', 'OK', 'Получено исправление от модели', JSON.stringify(parsedFix));
+      return parsedFix;
+    }
+    tracer.log('routes.js', 'askModelToFixStep', 'ERROR', 'Не удалось извлечь JSON-объект из ответа коррекции');
+  } catch (e) {
+    tracer.log('routes.js', 'askModelToFixStep', 'ERROR', `Ошибка парсинга исправления: ${e.message}`);
+  } finally {
+    gpuMutex.release();
+  }
+  return null;
+}
+
+router.post('/v1/chat/completions', async (req, res) => {
+  await gpuMutex.acquire();
+  let session = null;
+
+  const isTestRun = process.env.RUN_LLM_TESTS === 'true';
+  const tracer = new ExecutionTracer(isTestRun ? 'test' : 'chat');
+  let chatTranscript = '';
+
+  try {
+    const { messages, stream = false, strictSandbox } = req.body;
+
+    let modeChanged = false;
+    if (typeof strictSandbox === 'boolean' && sandboxConfig.strictDefault !== strictSandbox) {
+      sandboxConfig.strictDefault = strictSandbox;
+      modeChanged = true;
+    }
 
     if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({
-        error: {
-          message: 'Поле "messages" должно быть непустым массивом.',
-          type: 'invalid_request_error',
-          code: 400
-        }
-      });
+      gpuMutex.release();
+      return res.status(400).json({ error: { message: 'Пустой массив messages', code: 400 } });
     }
 
     const userMessage = messages[messages.length - 1].content;
-    const engine = await initLlamaEngine();
-    session = await engine.createSession();
+    const currentMode = sandboxConfig.strictDefault ? 'strict' : 'free';
+
+    tracer.setContext(currentMode, userMessage);
+    tracer.log('routes.js', 'POST /v1/chat/completions', 'INFO', `stream=${stream}, mode=${currentMode}, reset=${modeChanged}`);
+
+    await initMind();
+    await updateMindState(st => ({
+      ...st,
+      coreGoal: userMessage,
+      mode: currentMode
+    }));
+
+    const mindSummary = await getMindContextSummary();
+    const modeBadge = sandboxConfig.strictDefault ? '🔒 [Песочница]' : '🔓 [Свободный режим]';
+
+    session = await getPersistentSession(modeChanged);
 
     if (!stream) {
-      const prompt = `${getToolsSystemPrompt()}\n\nЗапрос пользователя: ${userMessage}`;
+      const prompt = `ТЕКУЩИЙ РЕЖИМ РАБОТЫ: ${currentMode.toUpperCase()} (${sandboxConfig.strictDefault ? 'Строго внутри tests/sandbox/' : 'Свободный доступ по всему проекту'}).\n\n${getToolsSystemPrompt()}\n\n${mindSummary}\n\nЗапрос: ${userMessage}`;
       const responseText = await session.prompt(prompt);
+      gpuMutex.release();
+
+      const cleanResp = responseText.trim();
+      tracer.setFinalResponse(cleanResp);
+      tracer.log('routes.js', 'session.prompt (non-stream)', 'OK', 'Ответ сформирован');
+      await tracer.commitAndSavePdf();
 
       return res.json({
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: 'local-agent-model',
-        choices: [{ index: 0, message: { role: 'assistant', content: responseText.trim() }, finish_reason: 'stop' }],
+        choices: [{ index: 0, message: { role: 'assistant', content: cleanResp }, finish_reason: 'stop' }],
         usage: { prompt_tokens: -1, completion_tokens: -1, total_tokens: -1 }
       });
     }
 
-    // Режим агентичного SSE-стриминга с самокоррекцией
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
     const sendSSE = (data) => {
+      const chunk = data?.choices?.[0]?.delta?.content;
+      if (chunk) chatTranscript += chunk;
       res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
 
-    sendSSE({
-      choices: [{ delta: { role: 'assistant', content: '📋 Анализирую задачу и составляю пошаговый план...\n' } }]
-    });
+    sendSSE({ choices: [{ delta: { role: 'assistant', content: `🧠 ${modeBadge} Думаю...\n` } }] });
 
-    const plannerPrompt = `${getToolsSystemPrompt()}
+    const cognitivePrompt = `ТЕКУЩИЙ АКТИВНЫЙ РЕЖИМ СИСТЕМЫ: ${currentMode.toUpperCase()}
+${sandboxConfig.strictDefault ? '-> ВНИМАНИЕ: Включен строгий режим песочницы (tests/sandbox/).' : '-> ВНИМАНИЕ: Включен СВОБОДНЫЙ режим работы по всему проекту.'}
 
-Ты — автономный агент-планировщик «Конструкт АИ». Твоя задача — проанализировать запрос пользователя и составить пошаговый план выполнения в виде строгого JSON-массива объектов следующей структуры:
+${getToolsSystemPrompt()}
+
+ОПЫТ ПРОШЛЫХ ОШИБОК:
+${mindSummary}
+
+Запрос пользователя: ${userMessage}
+
+ПРАВИЛА ОТВЕТА:
+1. Если это обычный вопрос, отказ из-за ограничений песочницы или уточнение папки в свободном режиме — отвечай ТОЛЬКО чистым текстом на русском языке без JSON.
+2. Если в свободном режиме пользователь не указал путь (например, "создай файл data.txt"), ты ОБЯЗАН задать вопрос текстом: "В какой именно папке создать файл?" и НЕ вызывать инструменты.
+3. Если требуется выполнить действие инструментом и все условия режима соблюдены, верни СТРОГО валидный JSON-план с обязательным объектом "arguments":
 [
-  { "step": 1, "tool": "имя_инструмента", "arguments": { ... }, "description": "описание шага" }
+  { "step": 1, "tool": "writeFile", "arguments": { "filePath": "путь/к/файлу", "content": "содержимое" }, "description": "Создание файла" }
 ]
+4. В поле "description" пиши ТОЛЬКО простой текст без кавычек и фигурных скобок!
 
-Доступные инструменты: readFile, writeFile, runCommand.
-Если инструменты не нужны для ответа, верни пустой массив [].
-Отвечай СТРОГО в формате валидного JSON-массива, без лишнего текста.
+Твой ответ:`;
 
-Запрос пользователя: ${userMessage}`;
+    const modelResponse = await session.prompt(cognitivePrompt);
+    gpuMutex.release();
 
-    const plannerResponse = await session.prompt(plannerPrompt);
-    
-    let plan = [];
-    try {
-      const jsonMatch = plannerResponse.match(/\[\s*\{[\s\S]*\}\s*\]/);
-      if (jsonMatch) {
-        plan = JSON.parse(jsonMatch[0]);
-      }
-    } catch (err) {
-      console.error('Ошибка парсинга плана агента:', err);
-    }
+    tracer.setModelPlan(modelResponse);
+    tracer.log('routes.js', 'session.prompt (stream)', 'OK', 'Получен ответ от модели');
 
-    if (!Array.isArray(plan) || plan.length === 0) {
-      sendSSE({
-        choices: [{ delta: { content: `\n${plannerResponse}\n` } }]
-      });
+    const plan = extractActionPlan(modelResponse);
+    const isJsonPlan = plan.length > 0;
+
+    if (!isJsonPlan) {
+      const cleanText = modelResponse.trim();
+      await pushRecursiveThought(`Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`, 1, false);
+
+      sendSSE({ choices: [{ delta: { content: `\n${cleanText}\n` } }] });
+      tracer.setFinalResponse(chatTranscript.trim());
+      tracer.log('routes.js', 'TextResponse', 'OK', 'Текстовый ответ отправлен в чат');
+      await tracer.commitAndSavePdf();
+
       res.write('data: [DONE]\n\n');
       return res.end();
     }
 
-    sendSSE({
-      choices: [{ delta: { content: `\n✅ План составлен (${plan.length} шагов). Начинаю выполнение...\n\n` } }]
-    });
+    await pushRecursiveThought(`Запрос: ${userMessage} -> План из ${plan.length} шагов`, 1, false);
+    tracer.log('routes.js', 'PlanParser', 'OK', `План из ${plan.length} шагов`, JSON.stringify(plan));
+    sendSSE({ choices: [{ delta: { content: `\n✅ План принят (${plan.length} шагов). Выполняем...\n\n` } }] });
 
-    for (const item of plan) {
-      sendSSE({
-        choices: [{ delta: { content: `▶ Шаг ${item.step}: ${item.description} [\`${item.tool}\`]\n` } }]
-      });
-    }
+    let currentStepMeta = null;
 
-    // Первая попытка выполнения плана
-    let executionReport = await executePlan(plan);
+    const progressCallback = (event) => {
+      if (event.type === 'step_start') {
+        const stepObj = plan.find(p => (p.step || 1) === event.step) || {};
+        const target = stepObj.arguments?.filePath || stepObj.arguments?.commandId || stepObj.arguments?.command || 'не указан';
+        currentStepMeta = { step: event.step, tool: event.tool, target };
 
-    // 🔥 ЦИКЛ САМОКОРРЕКЦИИ (Self-Correction): Если план упал с ошибкой, даем агенту шанс исправиться
-    if (!executionReport.success) {
-      sendSSE({
-        choices: [{ delta: { content: '\n⚠️ Обнаружена ошибка при выполнении. Запускаю самокоррекцию плана...\n\n' } }]
-      });
-
-      const errorContext = JSON.stringify(executionReport.steps);
-      const correctionPrompt = `${getToolsSystemPrompt()}
-
-Предыдущий план для задачи "${userMessage}" завершился ошибкой.
-Отчет о выполнении шагов: ${errorContext}
-
-Проанализируй ошибку, исправь неверные аргументы или шаги и сформируй НОВЫЙ исправленный JSON-массив плана.
-Отвечай СТРОГО в формате валидного JSON-массива, без лишнего текста.`;
-
-      const correctionResponse = await session.prompt(correctionPrompt);
-      
-      try {
-        const jsonMatch = correctionResponse.match(/\[\s*\{[\s\S]*\}\s*\]/);
-        if (jsonMatch) {
-          const newPlan = JSON.parse(jsonMatch[0]);
-          if (Array.isArray(newPlan) && newPlan.length > 0) {
-            sendSSE({
-              choices: [{ delta: { content: `🔄 Новый скорректированный план составлен (${newPlan.length} шагов). Выполняем повторно...\n\n` } }]
-            });
-            for (const item of newPlan) {
-              sendSSE({
-                choices: [{ delta: { content: `▶ (Исправление) Шаг ${item.step}: ${item.description} [\`${item.tool}\`]\n` } }]
-              });
-            }
-            executionReport = await executePlan(newPlan);
-          }
+        tracer.log('executor.js', `Шаг ${event.step} (${event.tool})`, 'INFO', `${event.description} [Путь: ${target}]`);
+        sendSSE({ choices: [{ delta: { content: `▶ Шаг ${event.step}: ${event.description} [\`${event.tool}\`]\n` } }] });
+      } else if (event.type === 'step_result') {
+        const target = currentStepMeta?.target || 'не указан';
+        if (event.success) {
+          tracer.addAction(event.step, currentStepMeta?.tool, target, 'OK', event.result || 'Выполнено');
+          tracer.log('executor.js', `Шаг ${event.step}`, 'OK', event.result || 'Успешно');
+          sendSSE({ choices: [{ delta: { content: `   ✔ Успешно.\n` } }] });
+        } else {
+          tracer.addAction(event.step, currentStepMeta?.tool, target, 'ERROR', event.error);
+          tracer.log('executor.js', `Шаг ${event.step}`, 'ERROR', event.error);
+          sendSSE({ choices: [{ delta: { content: `   ❌ Ошибка: ${event.error}\n` } }] });
         }
-      } catch (err) {
-        console.error('Ошибка самокоррекции плана:', err);
       }
-    }
+    };
 
-    // Итоговый ответ по результатам выполнения
+    const executionReport = await executePlan(
+      plan,
+      progressCallback,
+      session,
+      (step, err, sess) => askModelToFixStep(step, err, sess, tracer)
+    );
+
     if (executionReport.success) {
-      sendSSE({
-        choices: [{ delta: { content: '\n🎉 Все шаги плана успешно выполнены!\n' } }]
-      });
-
-      const summaryPrompt = `Пользователь просил: "${userMessage}". 
-План выполнен успешно. Результаты: ${JSON.stringify(executionReport.steps)}. 
-Дай финальный короткий ответ пользователю.`;
-      
-      const finalResponse = await session.prompt(summaryPrompt);
-      sendSSE({
-        choices: [{ delta: { content: `\n${finalResponse}\n` } }]
-      });
+      tracer.log('routes.js', 'ExecutionComplete', 'OK', 'Все шаги выполнены');
+      sendSSE({ choices: [{ delta: { content: '\n🎉 Готово!\n' } }] });
     } else {
-      sendSSE({
-        choices: [{ delta: { content: '\n❌ План не удалось выполнить даже после самокоррекции.\n' } }]
-      });
+      await pushRecursiveThought(`Провал: ${executionReport.error}`, 1, true);
+      tracer.log('routes.js', 'ExecutionComplete', 'ERROR', executionReport.error);
+      sendSSE({ choices: [{ delta: { content: `\n❌ Ошибка выполнения: ${executionReport.error}\n` } }] });
     }
+
+    tracer.setFinalResponse(chatTranscript.trim());
+    const pdfPath = await tracer.commitAndSavePdf();
+    console.log(`📄 Сводный PDF-отчёт обновлён: ${pdfPath}`);
 
     res.write('data: [DONE]\n\n');
     res.end();
 
   } catch (error) {
-    console.error('Ошибка в обработчике /v1/chat/completions:', error);
+    console.error('Ошибка:', error);
+    tracer.log('routes.js', 'GlobalCatch', 'ERROR', error.message);
+    tracer.setFinalResponse(chatTranscript.trim() || `Ошибка: ${error.message}`);
+    await tracer.commitAndSavePdf();
+
     if (!res.headersSent) {
-      return res.status(500).json({
-        error: { message: error.message, type: 'internal_server_error', code: 500 }
-      });
+      res.status(500).json({ error: { message: error.message } });
     } else {
       res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
       res.end();
     }
+  } finally {
+    gpuMutex.release();
   }
+});
+
+router.get('/v1/mind', async (req, res) => {
+  const mindData = await initMind();
+  res.json(mindData);
 });
 
 export default router;

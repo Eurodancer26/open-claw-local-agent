@@ -1,0 +1,67 @@
+{
+  "coreGoal": "Молодец, хорошо справляешься!!!",
+  "activeDirectory": "tests/sandbox",
+  "mode": "free",
+  "thoughtStack": [
+    {
+      "depth": 1,
+      "file": "thought_1794984675935_d1.md",
+      "preview": "Запрос: Молодец, хорошо справляешься!!! -> Ответ: Спасибо! Я стараюсь помочь максимально эффективно.",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984473083_d1.md",
+      "preview": "Запрос: D:\\open-claw-local-agent\\tests\\free_mode -> План из 1 шагов",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984440671_d1.md",
+      "preview": "Запрос: Создай файл test2.js -> Ответ: В какой именно папке создать файл?",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984410998_d1.md",
+      "preview": "Запрос: В каком ты режиме? -> Ответ: Я работаю в свободном режиме.",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984397419_d1.md",
+      "preview": "Запрос: D:\\open-claw-local-agent\\tests\\free_mode -> План из 1 шагов",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984373023_d1.md",
+      "preview": "Запрос: Создай файл test1.js -> Ответ: В какой именно папке создать файл?",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984365537_d1.md",
+      "preview": "Запрос: Привет -> Ответ: Привет! Я автономный ИИ-агент и могу помочь с созданием, чтением и удаление",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984337083_d1.md",
+      "preview": "Запрос: D:\\open-claw-local-agent\\tests\\free_mode -> План из 1 шагов",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984314971_d1.md",
+      "preview": "Запрос: Создай файл data.txt -> Ответ: В какой именно папке создать файл?",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1794984298912_d1.md",
+      "preview": "Запрос: В каком режиме ты сейчас работаешь и почему? -> Ответ: Я работаю в свободном режиме, потому ",
+      "isError": false
+    }
+  ]
+}
