@@ -1,51 +1,111 @@
-import { toolsRegistry } from '../tools/registry.js';
+import path from 'path';
+import { toolsRegistry, sandboxConfig } from '../tools/registry.js';
 
-/**
- * Исполнитель пошагового плана агента с поддержкой возврата результатов для самокоррекции
- */
-export async function executePlan(plan) {
-  const executionResults = [];
-  let success = true;
+const WORKSPACE_ROOT = path.resolve();
 
-  console.log(`\n⚙️ [Executor] Запуск выполнения плана (${plan.length} шагов)...`);
+export async function executePlan(plan, progressCallback = () => {}, session = null, askModelToFix = null) {
+  let lastToolCallSignature = '';
+  let consecutiveDuplicates = 0;
 
-  for (const item of plan) {
-    const { step, tool: toolName, arguments: args, description } = item;
-    console.log(`   ▶ Шаг ${step}: ${description} [Инструмент: ${toolName}]`);
+  for (let i = 0; i < plan.length; i++) {
+    const step = plan[i];
+    const stepNum = step.step || (i + 1);
+    let toolName = step.tool;
+    let args = step.arguments || {};
 
-    const tool = toolsRegistry[toolName];
-    if (!tool) {
-      const errorMsg = `Инструмент "${toolName}" не найден в реестре.`;
-      console.error(`   ❌ ${errorMsg}`);
-      executionResults.push({ step, tool: toolName, success: false, error: errorMsg });
-      success = false;
-      break;
+    // LOOP GUARD: Проверяем на зацикливание
+    const currentSignature = `${toolName}:${JSON.stringify(args)}`;
+    if (currentSignature === lastToolCallSignature) {
+      consecutiveDuplicates++;
+    } else {
+      consecutiveDuplicates = 0;
+      lastToolCallSignature = currentSignature;
     }
 
+    if (consecutiveDuplicates >= 2) {
+      const errorMsg = `Loop Guard: Обнаружен бесконечный цикл. Инструмент "${toolName}" вызван повторно без изменений. Прерываю выполнение.`;
+      progressCallback({ type: 'step_start', step: stepNum, tool: toolName, description: step.description || 'Выполнение шага' });
+      progressCallback({ type: 'step_result', step: stepNum, success: false, error: errorMsg });
+      return { success: false, error: errorMsg };
+    }
+
+    progressCallback({
+      type: 'step_start',
+      step: stepNum,
+      tool: toolName,
+      description: step.description || 'Выполнение шага'
+    });
+
     try {
-      const result = await tool.execute(args);
-      executionResults.push({
-        step,
-        tool: toolName,
-        success: result.success,
-        result: result.success ? (result.content || result.stdout || result.message || 'Успешно выполнено') : null,
-        error: result.error || null
+      let tool = toolsRegistry[toolName];
+      if (!tool || typeof tool.execute !== 'function') {
+        throw new Error(`Неизвестный или недоступный инструмент: ${toolName}`);
+      }
+
+      // Первая попытка выполнения инструмента
+      let res = await tool.execute(args);
+
+      // 🩺 Хирургическая самокоррекция (Self-Correction Retry)
+      if (!res.success && session && typeof askModelToFix === 'function') {
+        progressCallback({
+          type: 'step_result',
+          step: stepNum,
+          success: false,
+          error: `${res.error} (Пробую исправить...)`
+        });
+
+        // Просим модель исправить инструмент или аргументы на основе ошибки
+        const fixResult = await askModelToFix({ tool: toolName, arguments: args, description: step.description }, res.error, session);
+        
+        if (fixResult && typeof fixResult === 'object') {
+          // Если модель решила сменить инструмент
+          if (fixResult.tool && toolsRegistry[fixResult.tool]) {
+            toolName = fixResult.tool;
+            tool = toolsRegistry[toolName];
+          }
+          // Если модель скорректировала аргументы
+          if (fixResult.arguments && typeof fixResult.arguments === 'object') {
+            args = fixResult.arguments;
+          } else if (!fixResult.tool && !fixResult.arguments) {
+            args = fixResult;
+          }
+
+          // Повторная попытка с исправленными параметрами
+          if (tool && typeof tool.execute === 'function') {
+            res = await tool.execute(args);
+          }
+        }
+      }
+
+      if (!res.success) {
+        const errorMsg = res.error || 'Ошибка выполнения шага';
+        progressCallback({
+          type: 'step_result',
+          step: stepNum,
+          success: false,
+          error: errorMsg
+        });
+        return { success: false, error: errorMsg };
+      }
+
+      const resultMsg = res.content || res.message || res.stdout || 'Успешно выполнено';
+      progressCallback({
+        type: 'step_result',
+        step: stepNum,
+        success: true,
+        result: resultMsg
       });
 
-      if (!result.success) {
-        console.error(`   ❌ Ошибка на шаге ${step}:`, result.error);
-        success = false;
-        break; // Прерываем выполнение для передачи ошибки обратно в цикл самокоррекции
-      } else {
-        console.log(`   ✔ Шаг ${step} выполнен успешно.`);
-      }
     } catch (err) {
-      console.error(`   ❌ Исключение на шаге ${step}:`, err.message);
-      executionResults.push({ step, tool: toolName, success: false, error: err.message });
-      success = false;
-      break;
+      progressCallback({
+        type: 'step_result',
+        step: stepNum,
+        success: false,
+        error: err.message
+      });
+      return { success: false, error: err.message };
     }
   }
 
-  return { success, steps: executionResults };
+  return { success: true };
 }

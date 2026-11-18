@@ -13,13 +13,13 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Подключаем API-маршруты в корень (чтобы работал путь /v1/chat/completions)
+// Подключаем API-маршруты в корень (чтобы работал путь /v1/chat/completions)[cite: 25]
 app.use(routes);
 
-// Запуск сервера, если файл запущен напрямую
+// Запуск сервера с привязкой строго к локальному интерфейсу (127.0.0.1)[cite: 9, 25]
 if (process.argv[1] === __filename) {
-  app.listen(PORT, () => {
-    console.log(`🚀 Сервер запущен на http://localhost:${PORT}`);
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`Сервер запущен на http://127.0.0.1:${PORT}`);
   });
 }
 

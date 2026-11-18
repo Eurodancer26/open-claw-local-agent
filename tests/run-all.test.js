@@ -20,7 +20,7 @@ async function waitForServer(url, timeoutMs = 15000) {
   throw new Error(`Сервер не ответил на ${url} за ${timeoutMs} мс`);
 }
 
-describe('Конструкт АИ — Единый полный комплекс тестов', () => {
+describe('Конструкт АИ — Единый полный комплекс тестов (Hardened)', () => {
   before(async () => {
     console.log('🚀 Запуск общего тестового сервера...');
     await fs.mkdir(path.resolve('tests/sandbox'), { recursive: true });
@@ -59,21 +59,34 @@ describe('Конструкт АИ — Единый полный комплекс
     assert.equal(cmdAttempt.success, false);
   });
 
-  it('2. Проверка работы файловых инструментов в песочнице', async () => {
+  it('2. Проверка работы базовых файловых инструментов и рекурсивного создания папок', async () => {
     const { toolsRegistry } = await import('../src/tools/registry.js');
-    const testFile = 'tests/sandbox/base-check.txt';
+    const testFile = 'tests/sandbox/deep/nested/dir/base-check.txt';
 
-    const writeRes = await toolsRegistry.writeFile.execute({ filePath: testFile, content: 'Hello tests!' });
-    assert.equal(writeRes.success, true);
+    const writeRes = await toolsRegistry.writeFile.execute({ filePath: testFile, content: 'Hello deep tests!' });
+    assert.equal(writeRes.success, true, `Ошибка записи во вложенную папку: ${writeRes.error}`);
 
     const readRes = await toolsRegistry.readFile.execute({ filePath: testFile });
     assert.equal(readRes.success, true);
-    assert.equal(readRes.content, 'Hello tests!');
+    assert.equal(readRes.content, 'Hello deep tests!');
 
-    await fs.rm(path.resolve(testFile), { force: true });
+    await fs.rm(path.resolve('tests/sandbox/deep'), { recursive: true, force: true });
   });
 
-  it('3. Проверка валидации API (статус 400 на пустые сообщения)', async () => {
+  it('3. Проверка инструмента удаления файлов (deleteFile)', async () => {
+    const { toolsRegistry } = await import('../src/tools/registry.js');
+    const targetFile = 'tests/sandbox/to-delete.txt';
+
+    await toolsRegistry.writeFile.execute({ filePath: targetFile, content: 'Delete me' });
+    
+    const deleteRes = await toolsRegistry.deleteFile.execute({ filePath: targetFile });
+    assert.equal(deleteRes.success, true, `Ошибка удаления: ${deleteRes.error}`);
+
+    const readAfterDelete = await toolsRegistry.readFile.execute({ filePath: targetFile });
+    assert.equal(readAfterDelete.success, false, 'Удаленный файл больше не должен читаться');
+  });
+
+  it('4. Проверка валидации API (статус 400 на пустые сообщения)', async () => {
     const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -82,16 +95,21 @@ describe('Конструкт АИ — Единый полный комплекс
     assert.equal(res.status, 400);
   });
 
-  it('4. Проверка безопасной команды из белого списка', async () => {
+  it('5. Проверка безопасных команд из белого списка (node-version, dir-list)', async () => {
     const { toolsRegistry } = await import('../src/tools/registry.js');
-    const cmdRes = await toolsRegistry.runCommand.execute({ commandId: 'node-version' });
-    assert.equal(cmdRes.success, true);
-    assert.match(cmdRes.stdout.trim(), /^v\d+\.\d+\.\d+/);
+    
+    const cmdRes1 = await toolsRegistry.runCommand.execute({ commandId: 'node-version' });
+    assert.equal(cmdRes1.success, true);
+    assert.match(cmdRes1.stdout.trim(), /^v\d+\.\d+\.\d+/);
+
+    const cmdRes2 = await toolsRegistry.runCommand.execute({ commandId: 'dir-list' });
+    assert.equal(cmdRes2.success, true);
+    assert.ok(cmdRes2.stdout.length > 0);
   });
 
   // --- БЛОК 2: LLM, СТРИМИНГ И АГЕНТИЧНЫЙ ЦИКЛ (при RUN_LLM_TESTS=true) ---
 
-  it('5. Сквозной HTTP-тест не-стриминга (stream: false)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
+  it('6. Сквозной HTTP-тест не-стриминга (stream: false)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
     const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -105,7 +123,7 @@ describe('Конструкт АИ — Единый полный комплекс
     assert.ok(data.choices?.[0]?.message?.content);
   });
 
-  it('6. Сквозной тест SSE-стриминга (stream: true)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
+  it('7. Сквозной тест SSE-стриминга (stream: true)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
     const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -134,7 +152,7 @@ describe('Конструкт АИ — Единый полный комплекс
     assert.equal(hasDoneMarker, true);
   });
 
-  it('7. Сквозной тест агентичного цикла Plan & Execute (создание и чтение файла)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
+  it('8. Сквозной тест агентичного цикла Plan & Execute (создание и чтение файла)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
     const targetFile = 'tests/sandbox/unified-agent-test.txt';
     await fs.rm(path.resolve(targetFile), { force: true }).catch(() => {});
 
@@ -149,20 +167,18 @@ describe('Конструкт АИ — Единый полный комплекс
 
     assert.equal(res.status, 200);
 
-    // Читаем поток до конца
     const reader = res.body.getReader();
     while (true) {
       const { done } = await reader.read();
       if (done) break;
     }
 
-    // Проверяем реальное появление файла на диске
     const content = await fs.readFile(path.resolve(targetFile), 'utf8');
     assert.equal(content, 'Единый тест пройден!');
     await fs.rm(path.resolve(targetFile), { force: true });
   });
 
-  it('8. Сквозной тест самокоррекции агента при ошибке пути', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
+  it('9. Сквозной тест самокоррекции агента при ошибке пути', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
     const targetFile = 'tests/sandbox/unified-correction.txt';
     await fs.rm(path.resolve(targetFile), { force: true }).catch(() => {});
 

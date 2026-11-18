@@ -20,3 +20,10 @@ Thumbs.db
 
 # Документация (исключено из репозитория)
 README.md
+
+# Нейро-роутер и локальные веса
+models/neural_router_weights.json
+models/*.gguf
+
+# Сводные PDF-отчёты и логи тестов
+reports/
