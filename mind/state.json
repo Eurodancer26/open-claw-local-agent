@@ -1,66 +1,66 @@
 {
-  "coreGoal": "Попытайся прочитать файл \"tests/sandbox/unified-correction.txt\". Если его нет, создай его с текстом \"Самокоррекция в едином тесте работает!\" и прочитай.",
+  "coreGoal": "Придумай название для ИТ-стартапа в сфере кибербезопасности и напиши слоган для него.",
   "activeDirectory": "tests/sandbox",
   "mode": "strict",
   "thoughtStack": [
     {
       "depth": 1,
-      "file": "thought_1795073327489_d1.md",
-      "preview": "Запрос: Попытайся прочитать файл \"tests/sandbox/unified-correction.txt\". Если его нет, создай его с ",
+      "file": "thought_1795095701452_d1.md",
+      "preview": "Запрос: Создай тестовую функцию и проверь работу полигона -> План из 2 шагов",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795073322998_d1.md",
-      "preview": "Запрос: Создай файл \"tests/sandbox/unified-agent-test.txt\" с текстом \"Единый тест пройден!\" и прочит",
+      "file": "thought_1795095624820_d1.md",
+      "preview": "Запрос: Напиши функцию сложения двух чисел на JS -> План из 1 шагов",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795073317709_d1.md",
-      "preview": "Запрос: Напиши слово: привет -> Ответ: привет",
+      "file": "thought_1795095593576_d1.md",
+      "preview": "Запрос: Создай файл \"tests/sandbox/buggy.js\" с заведомо синтаксически неверным кодом (например, проп",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795073063897_d1.md",
-      "preview": "Запрос: Попытайся прочитать файл \"tests/sandbox/unified-correction.txt\". Если его нет, создай его с ",
+      "file": "thought_1795095576825_d1.md",
+      "preview": "Запрос: Создай файл \"tests/sandbox/calc.js\" с функцией умножения двух чисел, затем создай файл \"test",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795073057431_d1.md",
-      "preview": "Запрос: Создай файл \"tests/sandbox/unified-agent-test.txt\" с текстом \"Единый тест пройден!\" и прочит",
+      "file": "thought_1795095425800_d1.md",
+      "preview": "Запрос: Прочитай файл tests/sandbox/sample-calc.test.js и покажи его содержимое. -> План из 1 шагов",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795073051823_d1.md",
-      "preview": "Запрос: Напиши слово: привет -> Ответ: привет",
+      "file": "thought_1795095394536_d1.md",
+      "preview": "Запрос: Сгенерируй unit-тест для файла tests/sandbox/sample-calc.js и сохрани в tests/sandbox/sample",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795072765545_d1.md",
-      "preview": "Запрос: Попытайся прочитать файл \"tests/sandbox/unified-correction.txt\". Если его нет, создай его с ",
+      "file": "thought_1795095341811_d1.md",
+      "preview": "Запрос: Проанализируй папку tests/sandbox и расскажи краткую статистику по файлам и строкам. -> План",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795072757765_d1.md",
-      "preview": "Запрос: Создай файл \"tests/sandbox/unified-agent-test.txt\" с текстом \"Единый тест пройден!\" и прочит",
+      "file": "thought_1795095151112_d1.md",
+      "preview": "Запрос: Прочитай файл tests/sandbox/sample-calc.test.js и покажи его содержимое -> План из 1 шагов",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795072752221_d1.md",
-      "preview": "Запрос: Напиши слово: привет -> Ответ: привет",
+      "file": "thought_1795095115096_d1.md",
+      "preview": "Запрос: Сгенерируй unit-тест для файла tests/sandbox/sample-calc.js и сохрани в tests/sandbox/sample",
       "isError": false
     },
     {
       "depth": 1,
-      "file": "thought_1795072547747_d1.md",
-      "preview": "Запрос: Попытайся прочитать файл \"tests/sandbox/unified-correction.txt\". Если его нет, создай его с ",
+      "file": "thought_1795095075135_d1.md",
+      "preview": "Запрос: Проанализируй папку tests/sandbox и расскажи краткую статистику по файлам и строкам. -> План",
       "isError": false
     }
   ]
