@@ -1,8 +1,20 @@
 {
-  "coreGoal": "Молодец, хорошо справляешься!!!",
+  "coreGoal": "Создай файл test.txt с текстом: \"привет из песочницы\"",
   "activeDirectory": "tests/sandbox",
-  "mode": "free",
+  "mode": "strict",
   "thoughtStack": [
+    {
+      "depth": 1,
+      "file": "thought_1795022469523_d1.md",
+      "preview": "Запрос: Создай файл test.txt с текстом: \"привет из песочницы\" -> План из 1 шагов",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1795022364469_d1.md",
+      "preview": "Запрос: Привет! Кто ты и какой режим сейчас включен? -> Ответ: Привет! Я автономный ИИ-агент и могу ",
+      "isError": false
+    },
     {
       "depth": 1,
       "file": "thought_1794984675935_d1.md",
@@ -49,18 +61,6 @@
       "depth": 1,
       "file": "thought_1794984337083_d1.md",
       "preview": "Запрос: D:\\open-claw-local-agent\\tests\\free_mode -> План из 1 шагов",
-      "isError": false
-    },
-    {
-      "depth": 1,
-      "file": "thought_1794984314971_d1.md",
-      "preview": "Запрос: Создай файл data.txt -> Ответ: В какой именно папке создать файл?",
-      "isError": false
-    },
-    {
-      "depth": 1,
-      "file": "thought_1794984298912_d1.md",
-      "preview": "Запрос: В каком режиме ты сейчас работаешь и почему? -> Ответ: Я работаю в свободном режиме, потому ",
       "isError": false
     }
   ]

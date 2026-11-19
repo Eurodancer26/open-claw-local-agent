@@ -1,9 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
+
 const WORKSPACE_ROOT = path.resolve();
 const SANDBOX_REL = path.join('tests', 'sandbox');
 const SANDBOX_DIR = path.resolve(WORKSPACE_ROOT, SANDBOX_REL);
@@ -74,11 +75,12 @@ async function resolveSafePath(userPath) {
     );
   }
 
-  const realActiveRoot = await fs.realpath(activeRoot);
   try {
+    const realActiveRoot = await fs.realpath(activeRoot);
     const stat = await fs.lstat(absoluteTarget);
     const realTarget = await fs.realpath(absoluteTarget);
     const relReal = path.relative(realActiveRoot, realTarget);
+
     if (relReal.startsWith('..') || path.isAbsolute(relReal)) {
       throw new Error(
         stat.isSymbolicLink()
@@ -89,6 +91,7 @@ async function resolveSafePath(userPath) {
     return absoluteTarget;
   } catch (err) {
     if (err.code === 'ENOENT') {
+      const realActiveRoot = await fs.realpath(activeRoot).catch(() => activeRoot);
       await verifyNearestExistingAncestor(absoluteTarget, realActiveRoot);
       return absoluteTarget;
     }
@@ -125,6 +128,7 @@ export const toolsRegistry = {
       }
     }
   },
+
   writeFile: {
     description: 'Записывает текст в файл. Аргументы: { "filePath": "путь/к/файлу", "content": "текст" }',
     async execute(args) {
@@ -139,6 +143,7 @@ export const toolsRegistry = {
       }
     }
   },
+
   deleteFile: {
     description: 'Удаляет файл. Аргументы: { "filePath": "путь/к/файлу" }',
     async execute(args) {
@@ -152,6 +157,7 @@ export const toolsRegistry = {
       }
     }
   },
+
   runCommand: {
     description: 'Выполняет разрешенную команду из белого списка. Аргументы: { "commandId": "node-version" | "npm-version" | "dir-list" }',
     async execute(args) {
@@ -171,22 +177,20 @@ export const toolsRegistry = {
 };
 
 export function getToolsSystemPrompt() {
-  let prompt = 'Ты — автономный ИИ-агент «Конструкт АИ». У тебя есть следующие инструменты:\n\n';
+  let prompt = 'Ты автономный ИИ-агент «Конструкт АИ». У тебя есть следующие инструменты:\n\n';
   for (const [name, tool] of Object.entries(toolsRegistry)) {
     prompt += `- **${name}**: ${tool.description}\n`;
   }
-
-  prompt += '\n🚨 СТРОГИЕ ПРАВИЛА ДИАЛОГА И ЧЕСТНОСТИ:\n';
-  prompt += '1. ИНФОРМАЦИОННЫЕ ВОПРОСЫ И БЕСЕДА: Если пользователь спрашивает "Кто ты?", "В каком ты режиме?", приветствует тебя или ведет обычный диалог — ТЫ ОБЯЗАН ответить чистым текстом на русском языке. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО возвращать JSON-планы или создавать файлы на информационные вопросы!\n';
+  prompt += '\nСТРОГИЕ ПРАВИЛА ДИАЛОГА И ЧЕСТНОСТИ:\n';
+  prompt += '1. ИНФОРМАЦИОННЫЕ ВОПРОСЫ И БЕСЕДА: Если пользователь спрашивает "Кто ты?", "В каком ты режиме?", приветствует тебя или ведет обычный диалог, ТЫ ОБЯЗАН ответить чистым текстом на русском языке. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО возвращать JSON-планы или создавать файлы на информационные вопросы!\n';
   prompt += '2. НЕДОСТУПНЫЕ ИНСТРУМЕНТЫ: Если у тебя нет подходящего инструмента для выполнения запроса (например, узнать точное время или погоду), ответь пользователю честным текстом: "У меня пока нет такого инструмента".\n';
-
+  
   if (sandboxConfig.strictDefault) {
-    prompt += '\n🔒 РЕЖИМ ПЕСОЧНИЦЫ (СТРОГО ПО УМОЛЧАНИЮ): Ты работаешь исключительно внутри папки `tests/sandbox/`. Все обычные относительные пути автоматически привязываются к `tests/sandbox/`.\n';
-    prompt += '⚠️ ЗАЩИТА ОТ ВЫХОДА ИЗ ПЕСОЧНИЦЫ: Если пользователь просит создать/изменить/удалить файл ВНЕ песочницы (например, "в корне проекта", "вне папки sandbox", "../"), НЕ создавай файл молча! Ответь обычным текстом в чат: объясни, что сейчас включён режим песочницы, ты не можешь работать в корне проекта, и предложи создать этот файл внутри `tests/sandbox/`.\n';
+    prompt += '\n3. РЕЖИМ ПЕСОЧНИЦЫ (СТРОГО ПО УМОЛЧАНИЮ): Ты работаешь исключительно внутри папки tests/sandbox/. Все обычные относительные пути автоматически привязываются к tests/sandbox/.\n';
+    prompt += '4. ЗАЩИТА ОТ ВЫХОДА ИЗ ПЕСОЧНИЦЫ: Если пользователь просит создать/изменить/удалить файл ВНЕ песочницы (например, "в корне проекта", "вне папки sandbox", "../"), НЕ создавай файл молча! Ответь обычным текстом в чат: объясни, что сейчас включён режим песочницы, ты не можешь работать в корне проекта, и предложи создать этот файл внутри tests/sandbox/`.\n';
   } else {
-    prompt += '\n🔓 РЕЖИМ СВОБОДЫ: Тебе разрешено создавать, читать и удалять файлы в любой папке проекта.\n';
-    prompt += '⚠️ ЖЕСТКОЕ ПРАВИЛО УТОЧНЕНИЯ ПУТИ: Если пользователь в своем запросе НЕ указал конкретный путь или папку для файла (например, написал просто "создай файл data.txt" или "создай скрипт.js" без указания директории), ТЫ КАТЕГОРИЧЕСКИ НЕ ИМЕЕШЬ ПРАВА вызывать инструменты и создавать файл в корне! Вместо этого ты ОБЯЗАН ответить чистым текстом в чат, задать вопрос пользователю и уточнить: в какой именно папке или директории создать этот файл?\n';
+    prompt += '\n3. РЕЖИМ СВОБОДЫ: Тебе разрешено создавать, читать и удалять файлы в любой папке проекта.\n';
+    prompt += '4. ЖЕСТКОЕ ПРАВИЛО УТОЧНЕНИЯ ПУТИ: Если пользователь в своем запросе НЕ указал конкретный путь или папку для файла (например, написал просто "создай файл data.txt" или "создай скрипт.js" без указания директории), ТЫ КАТЕГОРИЧЕСКИ НЕ ИМЕЕШЬ ПРАВА вызывать инструменты и создавать файл в корне! Вместо этого ты ОБЯЗАН ответить чистым текстом в чат, задать вопрос пользователю и уточнить: в какой именно папке или директории создать этот файл?\n';
   }
-
   return prompt;
 }
