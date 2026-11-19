@@ -9,6 +9,22 @@ const WORKSPACE_ROOT = path.resolve();
 const SANDBOX_REL = path.join('tests', 'sandbox');
 const SANDBOX_DIR = path.resolve(WORKSPACE_ROOT, SANDBOX_REL);
 
+const IGNORED_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'reports',
+  'dist',
+  'build',
+  'coverage',
+  'reflections'
+]);
+
+const TEXT_EXTENSIONS = new Set([
+  '.js', '.mjs', '.cjs', '.ts', '.jsx', '.tsx',
+  '.json', '.md', '.txt', '.html', '.css', '.scss',
+  '.yml', '.yaml', '.xml', '.env', '.sh', '.sql'
+]);
+
 export const sandboxConfig = {
   strictDefault: true // true — жестко всё в tests/sandbox, false — свобода выбора в пределах проекта
 };
@@ -99,6 +115,92 @@ async function resolveSafePath(userPath) {
   }
 }
 
+/**
+ * Рекурсивно собирает статистику по директории с ограничением глубины и числа файлов
+ */
+async function scanProjectStats(rootDir, maxDepth = 4, maxFiles = 250) {
+  const stats = {
+    totalFiles: 0,
+    totalDirs: 0,
+    totalLines: 0,
+    byExtension: {},
+    largestFiles: [],
+    topEntries: [],
+    truncated: false
+  };
+
+  const rootEntries = await fs.readdir(rootDir, { withFileTypes: true });
+  stats.topEntries = rootEntries
+    .filter((entry) => !IGNORED_DIRS.has(entry.name))
+    .map((entry) => ({
+      name: entry.name,
+      type: entry.isDirectory() ? 'dir' : 'file'
+    }));
+
+  async function walk(currentDir, depth) {
+    if (stats.totalFiles >= maxFiles) {
+      stats.truncated = true;
+      return;
+    }
+
+    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (stats.totalFiles >= maxFiles) {
+        stats.truncated = true;
+        return;
+      }
+
+      if (IGNORED_DIRS.has(entry.name)) {
+        continue;
+      }
+
+      const fullPath = path.join(currentDir, entry.name);
+      const relPath = path.relative(rootDir, fullPath) || entry.name;
+
+      if (entry.isDirectory()) {
+        stats.totalDirs += 1;
+        if (depth < maxDepth) {
+          await walk(fullPath, depth + 1);
+        }
+      } else if (entry.isFile()) {
+        stats.totalFiles += 1;
+        const ext = path.extname(entry.name).toLowerCase() || '(без расширения)';
+        stats.byExtension[ext] = (stats.byExtension[ext] || 0) + 1;
+
+        let fileSize = 0;
+        let lineCount = 0;
+
+        try {
+          const info = await fs.stat(fullPath);
+          fileSize = info.size;
+
+          if (TEXT_EXTENSIONS.has(ext) && fileSize <= 512 * 1024) {
+            const content = await fs.readFile(fullPath, 'utf8');
+            lineCount = content.length === 0 ? 0 : content.split(/\r?\n/).length;
+            stats.totalLines += lineCount;
+          }
+        } catch {
+          // Пропускаем недоступные при чтении файлы
+        }
+
+        stats.largestFiles.push({
+          path: relPath,
+          sizeBytes: fileSize,
+          lines: lineCount
+        });
+      }
+    }
+  }
+
+  await walk(rootDir, 0);
+
+  stats.largestFiles.sort((a, b) => b.sizeBytes - a.sizeBytes);
+  stats.largestFiles = stats.largestFiles.slice(0, 5);
+
+  return stats;
+}
+
 const SAFE_COMMANDS = {
   'node-version': {
     executable: process.execPath,
@@ -178,6 +280,124 @@ export const toolsRegistry = {
           type: entry.isDirectory() ? 'dir' : 'file'
         }));
         return { success: true, items, message: JSON.stringify(items) };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+  },
+
+  analyzeProject: {
+    description: 'Анализирует структуру директории/проекта: файлы, папки, строки кода, зависимости из package.json и крупные файлы. Аргументы: { "dirPath": "." }',
+    async execute(args = {}) {
+      try {
+        const targetDir = args.dirPath || args.filePath || args.path || '.';
+        const safePath = await resolveSafePath(targetDir);
+        const dirStat = await fs.stat(safePath);
+
+        if (!dirStat.isDirectory()) {
+          return { success: false, error: `Указанный путь не является директорией: ${targetDir}` };
+        }
+
+        const stats = await scanProjectStats(safePath);
+        let pkgSummary = null;
+
+        try {
+          const pkgRaw = await fs.readFile(path.join(safePath, 'package.json'), 'utf8');
+          const pkg = JSON.parse(pkgRaw);
+          pkgSummary = {
+            name: pkg.name || '(без имени)',
+            version: pkg.version || '0.0.0',
+            type: pkg.type || 'commonjs',
+            scripts: Object.keys(pkg.scripts || {}),
+            dependencies: Object.keys(pkg.dependencies || {})
+          };
+        } catch {
+          // В подпапках или песочнице package.json может отсутствовать
+        }
+
+        const relTarget = path.relative(WORKSPACE_ROOT, safePath) || '.';
+        const report = {
+          target: relTarget,
+          packageInfo: pkgSummary,
+          totalDirs: stats.totalDirs,
+          totalFiles: stats.totalFiles,
+          totalLines: stats.totalLines,
+          byExtension: stats.byExtension,
+          largestFiles: stats.largestFiles,
+          topEntries: stats.topEntries,
+          truncated: stats.truncated
+        };
+
+        return {
+          success: true,
+          report,
+          message: JSON.stringify(report)
+        };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+  },
+
+  generateUnitTest: {
+    description: 'Читает исходный файл и генерирует заготовку unit-теста на node:test. Аргументы: { "sourcePath": "путь/к/модулю.js", "outputPath": "путь/к/тесту.test.js" }',
+    async execute(args = {}) {
+      try {
+        const srcInput = args.sourcePath || args.filePath || args.path;
+        if (!srcInput || typeof srcInput !== 'string') {
+          return { success: false, error: 'Не указан путь к исходному файлу (sourcePath).' };
+        }
+
+        const safeSrc = await resolveSafePath(srcInput);
+        const sourceCode = await fs.readFile(safeSrc, 'utf8');
+
+        const fnMatches = [...sourceCode.matchAll(/(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)/g)].map(m => m[1]);
+        const arrowMatches = [...sourceCode.matchAll(/(?:export\s+)?const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\(/g)].map(m => m[1]);
+        const classMatches = [...sourceCode.matchAll(/(?:export\s+)?class\s+([A-Za-z0-9_]+)/g)].map(m => m[1]);
+        const symbols = [...new Set([...fnMatches, ...arrowMatches, ...classMatches])];
+
+        const baseName = path.basename(safeSrc, path.extname(safeSrc));
+        const defaultOut = path.join(SANDBOX_REL, `${baseName}.generated.test.js`);
+        const rawOut = args.outputPath || defaultOut;
+        const safeOut = await resolveSafePath(rawOut);
+
+        const relImport = path.relative(path.dirname(safeOut), safeSrc).replaceAll('\\', '/');
+        const importPath = relImport.startsWith('.') ? relImport : `./${relImport}`;
+
+        const casesBlock = symbols.length > 0
+          ? symbols.map((sym) => [
+              `  it('должен импортировать и проверять ${sym}', async () => {`,
+              `    const mod = await import('${importPath}');`,
+              `    assert.ok('${sym}' in mod, 'Ожидался экспорт ${sym}');`,
+              `  });`
+            ].join('\n')).join('\n\n')
+          : [
+              `  it('должен успешно импортироваться без ошибок', async () => {`,
+              `    const mod = await import('${importPath}');`,
+              `    assert.ok(mod, 'Модуль должен быть загружен');`,
+              `  });`
+            ].join('\n');
+
+        const testContent = [
+          `import { describe, it } from 'node:test';`,
+          `import assert from 'node:assert/strict';`,
+          ``,
+          `describe('Автотест для ${path.basename(safeSrc)}', () => {`,
+          casesBlock,
+          `});`,
+          ``
+        ].join('\n');
+
+        await fs.mkdir(path.dirname(safeOut), { recursive: true });
+        await fs.writeFile(safeOut, testContent, 'utf8');
+
+        const relOut = path.relative(WORKSPACE_ROOT, safeOut);
+        return {
+          success: true,
+          outputPath: relOut,
+          detectedSymbols: symbols,
+          message: `Сгенерирован тест: ${relOut} (найдено символов: ${symbols.length})`
+        };
       } catch (err) {
         return { success: false, error: err.message };
       }

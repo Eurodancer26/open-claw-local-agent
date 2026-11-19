@@ -20,6 +20,7 @@ let sessionTurnCount = 0; // Счётчик ходов в текущей LLM-с�
 const MAX_CONTEXT_MESSAGES = 12;
 const MAX_CHARS_PER_MESSAGE = 2000;
 const MAX_SESSION_TURNS = 10;
+const MAX_CHAT_CODE_CHARS = 4000;
 
 // 🧠 Инициализация нейро-роутера («мозжечка»)
 const neuralRouter = new NeuralSkillRouter();
@@ -148,6 +149,99 @@ function extractActionPlan(modelResponse) {
     return [parsed];
   }
   return [];
+}
+
+/**
+ * Преобразует сырой результат шага в структурированный объект
+ */
+function parseStepResultData(rawResult) {
+  if (!rawResult) return null;
+  if (typeof rawResult === 'object') return rawResult;
+  if (typeof rawResult === 'string') {
+    try {
+      return JSON.parse(rawResult);
+    } catch {
+      return { message: rawResult };
+    }
+  }
+  return { message: String(rawResult) };
+}
+
+/**
+ * Форматирует результат выполнения инструмента для отображения пользователю в чате
+ */
+function formatStepResultForChat(toolName, rawResult) {
+  if (rawResult === undefined || rawResult === null) {
+    return '✔ Успешно.\n';
+  }
+
+  const data = parseStepResultData(rawResult);
+
+  if (toolName === 'readFile') {
+    const text = typeof rawResult === 'string'
+      ? (data && typeof data.content === 'string' ? data.content : rawResult)
+      : (typeof data?.content === 'string' ? data.content : JSON.stringify(data, null, 2));
+
+    const clipped = text.length > MAX_CHAT_CODE_CHARS
+      ? `${text.slice(0, MAX_CHAT_CODE_CHARS)}\n... [обрезано, всего ${text.length} символов]`
+      : text;
+
+    return `✔ Успешно. Содержимое файла:\n\`\`\`\n${clipped}\n\`\`\`\n`;
+  }
+
+  if (toolName === 'analyzeProject') {
+    const reportObj = data?.report || (data && typeof data.totalFiles === 'number' ? data : null);
+
+    if (reportObj) {
+      const extList = Object.entries(reportObj.byExtension || {})
+        .map(([ext, count]) => `${ext}: ${count}`)
+        .join(', ') || 'нет';
+      const largestList = Array.isArray(reportObj.largestFiles) && reportObj.largestFiles.length > 0
+        ? reportObj.largestFiles.map((f) => `${f.path} (${f.lines} строк, ${f.sizeBytes} Б)`).join('; ')
+        : 'нет';
+
+      const lines = [
+        '✔ Успешно. Краткая статистика:',
+        `- Директория: \`${reportObj.target}\``,
+        `- Папок: ${reportObj.totalDirs}, файлов: ${reportObj.totalFiles}, строк кода: ${reportObj.totalLines}`,
+        `- По расширениям: ${extList}`,
+        `- Крупные файлы: ${largestList}`
+      ];
+
+      if (reportObj.packageInfo) {
+        lines.push(`- Пакет: ${reportObj.packageInfo.name}@${reportObj.packageInfo.version} (${reportObj.packageInfo.type})`);
+      }
+
+      return `${lines.join('\n')}\n`;
+    }
+
+    const summaryText = typeof rawResult === 'string' ? rawResult.trim() : JSON.stringify(data, null, 2);
+    return `✔ Успешно. Результат анализа:\n${summaryText}\n`;
+  }
+
+  if (toolName === 'listDir' && data && Array.isArray(data.items)) {
+    const listText = data.items.length > 0
+      ? data.items.map((item) => `${item.type === 'dir' ? '[dir]' : '[file]'} ${item.name}`).join(', ')
+      : 'пусто';
+    return `✔ Успешно. Элементы: ${listText}\n`;
+  }
+
+  if (data && typeof data.message === 'string' && data.message.trim().length > 0) {
+    const extraSymbols = Array.isArray(data.detectedSymbols) && data.detectedSymbols.length > 0
+      ? ` (символы: ${data.detectedSymbols.join(', ')})`
+      : '';
+    return `✔ Успешно. ${data.message}${extraSymbols}\n`;
+  }
+
+  if (typeof rawResult === 'string' && rawResult.trim().length > 0) {
+    return `✔ Успешно. ${rawResult.trim()}\n`;
+  }
+
+  if (data && typeof data.stdout === 'string' && data.stdout.trim().length > 0) {
+    return `✔ Успешно.\n\`\`\`\n${data.stdout.trim()}\n\`\`\`\n`;
+  }
+
+  return '✔ Успешно.\n';
 }
 
 async function askModelToFixStep(step, errorMessage, session, tracer) {
@@ -317,18 +411,29 @@ ${mindSummary}${recentHistoryBlock}
     const progressCallback = (event) => {
       if (event.type === 'step_start') {
         const stepObj = plan.find(p => (p.step || 1) === event.step) || {};
-        const target = stepObj.arguments?.filePath || stepObj.arguments?.commandId || stepObj.arguments?.command || 'не указан';
-        currentStepMeta = { step: event.step, tool: event.tool, target };
-        tracer.log('executor.js', `Шаг ${event.step} (${event.tool})`, 'INFO', `${event.description} [Путь: ${target}]`);
-        sendSSE({ choices: [{ delta: { content: `▶ Шаг ${event.step}: ${event.description} [\`${event.tool}\`]\n` } }] });
+        const argsObj = stepObj.arguments || {};
+        const target =
+          argsObj.filePath ||
+          argsObj.dirPath ||
+          argsObj.sourcePath ||
+          argsObj.outputPath ||
+          argsObj.path ||
+          argsObj.commandId ||
+          argsObj.command ||
+          'не указан';
+        currentStepMeta = { step: event.step, tool: event.tool || stepObj.tool, target };
+        tracer.log('executor.js', `Шаг ${event.step} (${currentStepMeta.tool})`, 'INFO', `${event.description} [Путь: ${target}]`);
+        sendSSE({ choices: [{ delta: { content: `▶ Шаг ${event.step}: ${event.description} [\`${currentStepMeta.tool}\`]\n` } }] });
       } else if (event.type === 'step_result') {
         const target = currentStepMeta?.target || 'не указан';
+        const toolName = event.tool || currentStepMeta?.tool;
         if (event.success) {
-          tracer.addAction(event.step, currentStepMeta?.tool, target, 'OK', event.result || 'Выполнено');
+          tracer.addAction(event.step, toolName, target, 'OK', event.result || 'Выполнено');
           tracer.log('executor.js', `Шаг ${event.step}`, 'OK', event.result || 'Успешно');
-          sendSSE({ choices: [{ delta: { content: `✔ Успешно.\n` } }] });
+          const formatted = formatStepResultForChat(toolName, event.result);
+          sendSSE({ choices: [{ delta: { content: formatted } }] });
         } else {
-          tracer.addAction(event.step, currentStepMeta?.tool, target, 'ERROR', event.error);
+          tracer.addAction(event.step, toolName, target, 'ERROR', event.error);
           tracer.log('executor.js', `Шаг ${event.step}`, 'ERROR', event.error);
           sendSSE({ choices: [{ delta: { content: `❌ Ошибка: ${event.error}\n` } }] });
         }
