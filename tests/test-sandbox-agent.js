@@ -17,7 +17,7 @@ async function runSandboxTests() {
   // 2. Тестируем writeFile в полигоне
   const testFilePath = 'tests/sandbox/hello-agent.js';
   const testFileContent = 'console.log("Hello from Open Claw Sandbox!");';
-  
+
   const writeRes = await toolsRegistry.writeFile.execute({
     filePath: testFilePath,
     content: testFileContent
@@ -30,14 +30,14 @@ async function runSandboxTests() {
   });
   console.log('📖 Тест readFile:', readRes);
 
-  // 4. Тестируем runCommand (запуск созданного файла в песочнице)
+  // 4. Тестируем runCommand (разрешенная команда из белого списка SAFE_COMMANDS)
   const cmdRes = await toolsRegistry.runCommand.execute({
-    command: 'node tests/sandbox/hello-agent.js'
+    commandId: 'node-version'
   });
   console.log('⚡ Тест runCommand:', cmdRes);
 
   console.log('\n🌐 Проверяем SSE-стриминг к серверу...');
-  
+
   // 5. Проверка реального стриминг-запроса к нашему серверу
   const postData = JSON.stringify({
     messages: [{ role: 'user', content: 'Создай тестовую функцию и проверь работу полигона' }],

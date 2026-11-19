@@ -4,11 +4,13 @@ import { initLlamaEngine } from '../src/core/engine.js';
 import { getToolsSystemPrompt } from '../src/tools/registry.js';
 
 describe('Конструкт АИ — Тесты планировщика (Planner)', () => {
-  it('Планнер должен формировать валидный JSON-план по задаче пользователя', { skip: process.env.RUN_LLM_TESTS !== 'true', timeout: 300_000 }, async () => {
-    const engine = await initLlamaEngine();
-    const session = await engine.createSession();
+  it(
+    'Планнер должен формировать валидный JSON-план по задаче пользователя',
+    { skip: process.env.RUN_LLM_TESTS !== 'true', timeout: 300_000 },
+    async () => {
+      const session = await initLlamaEngine();
 
-    const plannerPrompt = `${getToolsSystemPrompt()}
+      const plannerPrompt = `${getToolsSystemPrompt()}
 
     Ты — автономный агент-планировщик «Конструкт АИ». Твоя задача — проанализировать запрос пользователя и составить пошаговый план выполнения в виде строгого JSON-массива объектов следующей структуры:
     [
@@ -21,19 +23,19 @@ describe('Конструкт АИ — Тесты планировщика (Plann
 
     Запрос пользователя: Создай файл "tests/sandbox/plan-test.txt" с текстом "Plan & Execute работает!" и затем прочитай его.`;
 
-    const responseText = await session.prompt(plannerPrompt);
-    console.log('   📋 Ответ планировщика:\n', responseText);
+      const responseText = await session.prompt(plannerPrompt);
+      console.log('   📋 Ответ планировщика:\n', responseText);
 
-    // Попробуем извлечь JSON из ответа
-    let jsonMatch = responseText.match(/\[\s*\{[\s\S]*\}\s*\]/);
-    assert.ok(jsonMatch, 'Ответ планировщика должен содержать JSON-массив шагов');
+      const jsonMatch = responseText.match(/\[\s*\{[\s\S]*\}\s*\]/);
+      assert.ok(jsonMatch, 'Ответ планировщика должен содержать JSON-массив шагов');
 
-    const plan = JSON.parse(jsonMatch[0]);
-    assert.ok(Array.isArray(plan), 'План должен быть массивом');
-    assert.ok(plan.length >= 2, 'План должен содержать как минимум 2 шага (запись и чтение)');
-    assert.equal(plan[0].tool, 'writeFile', 'Первым шагом должна быть запись файла');
-    assert.equal(plan[1].tool, 'readFile', 'Вторым шагом должно быть чтение файла');
+      const plan = JSON.parse(jsonMatch[0]);
+      assert.ok(Array.isArray(plan), 'План должен быть массивом');
+      assert.ok(plan.length >= 2, 'План должен содержать как минимум 2 шага (запись и чтение)');
+      assert.equal(plan[0].tool, 'writeFile', 'Первым шагом должна быть запись файла');
+      assert.equal(plan[1].tool, 'readFile', 'Вторым шагом должно быть чтение файла');
 
-    console.log('   ✔ План успешно распарсен и верифицирован!');
-  });
+      console.log('   ✔ План успешно распарсен и верифицирован!');
+    }
+  );
 });

@@ -6,7 +6,14 @@ const sandboxToggle = document.getElementById('sandbox-toggle');
 const sandboxModeLabel = document.getElementById('sandbox-mode-label');
 
 // Локальный массив истории сообщений для передачи контекста агенту
+const MAX_HISTORY_MESSAGES = 12;
 let messageHistory = [];
+
+function trimHistory() {
+  if (messageHistory.length > MAX_HISTORY_MESSAGES) {
+    messageHistory = messageHistory.slice(-MAX_HISTORY_MESSAGES);
+  }
+}
 
 function updateSandboxLabel() {
   if (sandboxToggle.checked) {
@@ -42,6 +49,7 @@ chatForm.addEventListener('submit', async (e) => {
 
   appendMessage('user', text);
   messageHistory.push({ role: 'user', content: text });
+  trimHistory();
 
   userInput.value = '';
   userInput.disabled = true;
@@ -55,7 +63,7 @@ chatForm.addEventListener('submit', async (e) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messages: messageHistory, // Передаем ВСЮ историю диалога!
+        messages: messageHistory, // Передаем обрезанную актуальную историю диалога
         stream: true,
         strictSandbox: sandboxToggle.checked
       })
@@ -98,9 +106,10 @@ chatForm.addEventListener('submit', async (e) => {
       }
     }
 
-    // Сохраняем ответ ассистента в историю
+    // Сохраняем ответ ассистента в историю и следим за лимитом контекста
     if (fullAssistantResponse) {
       messageHistory.push({ role: 'assistant', content: fullAssistantResponse });
+      trimHistory();
     }
 
   } catch (err) {

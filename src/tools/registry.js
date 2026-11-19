@@ -111,6 +111,14 @@ const SAFE_COMMANDS = {
   'dir-list': {
     executable: process.platform === 'win32' ? 'cmd.exe' : 'ls',
     args: process.platform === 'win32' ? ['/c', 'dir'] : ['-la']
+  },
+  'git-status': {
+    executable: 'git',
+    args: ['status', '--short']
+  },
+  'git-diff': {
+    executable: 'git',
+    args: ['diff', '--stat']
   }
 };
 
@@ -158,8 +166,26 @@ export const toolsRegistry = {
     }
   },
 
+  listDir: {
+    description: 'Возвращает список файлов и папок в директории. Аргументы: { "dirPath": "." }',
+    async execute(args = {}) {
+      try {
+        const targetDir = args.dirPath || args.filePath || args.path || '.';
+        const safePath = await resolveSafePath(targetDir);
+        const entries = await fs.readdir(safePath, { withFileTypes: true });
+        const items = entries.map((entry) => ({
+          name: entry.name,
+          type: entry.isDirectory() ? 'dir' : 'file'
+        }));
+        return { success: true, items, message: JSON.stringify(items) };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+  },
+
   runCommand: {
-    description: 'Выполняет разрешенную команду из белого списка. Аргументы: { "commandId": "node-version" | "npm-version" | "dir-list" }',
+    description: 'Выполняет разрешенную команду из белого списка. Аргументы: { "commandId": "node-version" | "npm-version" | "dir-list" | "git-status" | "git-diff" }',
     async execute(args) {
       try {
         const cmdId = args.commandId;
@@ -167,7 +193,11 @@ export const toolsRegistry = {
         if (!cmdConfig) {
           return { success: false, error: `Команда "${cmdId}" не разрешена в белом списке.` };
         }
-        const { stdout, stderr } = await execFileAsync(cmdConfig.executable, cmdConfig.args);
+        const { stdout, stderr } = await execFileAsync(cmdConfig.executable, cmdConfig.args, {
+          cwd: WORKSPACE_ROOT,
+          timeout: 60_000,
+          windowsHide: true
+        });
         return { success: true, stdout, stderr };
       } catch (err) {
         return { success: false, error: err.message };

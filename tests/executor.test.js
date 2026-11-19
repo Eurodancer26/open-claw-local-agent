@@ -7,8 +7,7 @@ import { executePlan } from '../src/core/executor.js';
 describe('Конструкт АИ — Тесты исполнителя (Executor)', () => {
   it('Исполнитель должен последовательно и корректно выполнять шаги плана', async () => {
     const testFilePath = 'tests/sandbox/exec-test.txt';
-    
-    // Подготовим тестовый план
+
     const samplePlan = [
       {
         step: 1,
@@ -24,16 +23,23 @@ describe('Конструкт АИ — Тесты исполнителя (Executo
       }
     ];
 
-    const executionReport = await executePlan(samplePlan);
+    try {
+      const executionReport = await executePlan(samplePlan);
 
-    assert.equal(executionReport.success, true, 'План должен выполниться успешно');
-    assert.equal(executionReport.steps.length, 2, 'Должно быть выполнено ровно 2 шага');
-    assert.equal(executionReport.steps[0].success, true, 'Шаг 1 (writeFile) должен завершиться успехом');
-    assert.equal(executionReport.steps[1].success, true, 'Шаг 2 (readFile) должен завершиться успехом');
-    assert.equal(executionReport.steps[1].result, 'Test execution content', 'Содержимое прочитанного файла должно совпадать');
+      assert.equal(executionReport.success, true, 'План должен выполниться успешно');
+      assert.ok(Array.isArray(executionReport.results), 'Поле results должно быть массивом');
+      assert.equal(executionReport.results.length, 2, 'Должно быть выполнено ровно 2 шага');
+      assert.equal(executionReport.results[0].success, true, 'Шаг 1 (writeFile) должен завершиться успехом');
+      assert.equal(executionReport.results[1].success, true, 'Шаг 2 (readFile) должен завершиться успехом');
+      assert.equal(
+        executionReport.results[1].output,
+        'Test execution content',
+        'Содержимое прочитанного файла должно совпадать'
+      );
 
-    // Очищаем за собой
-    await fs.rm(path.resolve(testFilePath), { force: true }).catch(() => {});
-    console.log('   ✔ Тест исполнителя успешно пройден!');
+      console.log('   ✔ Тест исполнителя успешно пройден!');
+    } finally {
+      await fs.rm(path.resolve(testFilePath), { force: true }).catch(() => {});
+    }
   });
 });

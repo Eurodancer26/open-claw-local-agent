@@ -1,4 +1,3 @@
-import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
 
@@ -6,10 +5,6 @@ const REPORTS_ROOT = path.resolve(process.cwd(), 'reports');
 const TEST_REPORTS_DIR = path.join(REPORTS_ROOT, 'tests');
 const CHAT_REPORTS_DIR = path.join(REPORTS_ROOT, 'chats');
 
-const FONT_PATH = 'C:\\Windows\\Fonts\\arial.ttf';
-const MONO_FONT_PATH = 'C:\\Windows\\Fonts\\consola.ttf';
-
-// Единый идентификатор запуска сервера, чтобы все запросы сессии писались в ОДИН PDF
 const SESSION_ID = new Date().toISOString().replace(/[:.]/g, '-');
 const sessionRecords = {
   test: [],
@@ -21,15 +16,111 @@ function ensureDirs() {
   fs.mkdirSync(CHAT_REPORTS_DIR, { recursive: true });
 }
 
+function stripControlChars(value) {
+  const str = String(value ?? '');
+  let result = '';
+
+  for (let i = 0; i < str.length; i += 1) {
+    const code = str.charCodeAt(i);
+    const isDisallowedControl =
+      (code >= 0x00 && code <= 0x08) ||
+      code === 0x0b ||
+      code === 0x0c ||
+      (code >= 0x0e && code <= 0x1f);
+
+    if (!isDisallowedControl) {
+      result += str.charAt(i);
+    }
+  }
+
+  return result;
+}
+
+function escapeXml(value) {
+  const amp = String.fromCharCode(38);
+  return stripControlChars(value)
+    .replace(/&/g, `${amp}amp;`)
+    .replace(/</g, `${amp}lt;`)
+    .replace(/>/g, `${amp}gt;`)
+    .replace(/"/g, `${amp}quot;`)
+    .replace(/'/g, `${amp}apos;`);
+}
+
+function escapeCdata(value) {
+  const amp = String.fromCharCode(38);
+  return stripControlChars(value).split(']]>').join(`]]]]><![CDATA[${amp}gt;`);
+}
+
+function buildSessionXml(sessionType, records) {
+  const reportTitle = sessionType === 'test'
+    ? 'Конструкт АИ — Сводный XML-отчёт (ТЕСТЫ)'
+    : 'Конструкт АИ — Сводный XML-отчёт (ЧАТ)';
+
+  const entriesXml = records
+    .map((rec, idx) => {
+      const actionsXml = rec.actions
+        .map((act) => {
+          return [
+            '      <action>',
+            `        <step>${escapeXml(act.step)}</step>`,
+            `        <tool>${escapeXml(act.tool || 'unknown')}</tool>`,
+            `        <targetPath>${escapeXml(act.targetPath || 'не указан')}</targetPath>`,
+            `        <status>${escapeXml(act.status)}</status>`,
+            `        <details>${escapeXml(act.details || '')}</details>`,
+            '      </action>'
+          ].join('\n');
+        })
+        .join('\n');
+
+      const eventsXml = rec.events
+        .map((ev) => {
+          const snippetBlock = ev.codeSnippet
+            ? `\n        <codeSnippet><![CDATA[${escapeCdata(ev.codeSnippet)}]]></codeSnippet>`
+            : '';
+          return [
+            '      <event>',
+            `        <timestamp>${escapeXml(ev.timestamp)}</timestamp>`,
+            `        <status>${escapeXml(ev.status)}</status>`,
+            `        <module>${escapeXml(ev.module)}</module>`,
+            `        <location>${escapeXml(ev.location)}</location>`,
+            `        <details>${escapeXml(ev.details || '')}</details>${snippetBlock}`,
+            '      </event>'
+          ].join('\n');
+        })
+        .join('\n');
+
+      return [
+        `  <record index="${idx + 1}">`,
+        `    <time>${escapeXml(rec.time)}</time>`,
+        `    <mode>${escapeXml(rec.mode)}</mode>`,
+        `    <userQuery>${escapeXml(rec.userQuery || '(пусто)')}</userQuery>`,
+        `    <modelRawPlan>${escapeXml(rec.modelRawPlan || '')}</modelRawPlan>`,
+        `    <actions>\n${actionsXml || '      <!-- Нет выполненных действий -->'}\n    </actions>`,
+        `    <finalChatResponse>${escapeXml(rec.finalChatResponse || '(нет текстового ответа)')}</finalChatResponse>`,
+        `    <events>\n${eventsXml || '      <!-- Нет событий трассировки -->'}\n    </events>`,
+        '  </record>'
+      ].join('\n');
+    })
+    .join('\n');
+
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    `<report type="${escapeXml(sessionType)}" sessionId="${escapeXml(SESSION_ID)}" totalRecords="${records.length}">`,
+    `  <title>${escapeXml(reportTitle)}</title>`,
+    `  <records>\n${entriesXml || '    <!-- Записей пока нет -->'}\n  </records>`,
+    '</report>'
+  ].join('\n');
+}
+
 export class ExecutionTracer {
   constructor(sessionType = 'chat') {
-    this.sessionType = sessionType; // 'test' | 'chat'
+    this.sessionType = sessionType === 'test' ? 'test' : 'chat';
     this.record = {
       time: new Date().toLocaleTimeString('ru-RU'),
       mode: 'strict',
       userQuery: '',
       modelRawPlan: '',
-      actions: [], // { step, tool, targetPath, status, details }
+      actions: [],
       finalChatResponse: '',
       events: []
     };
@@ -53,8 +144,9 @@ export class ExecutionTracer {
   }
 
   log(moduleName, location, status, details, codeSnippet = '') {
+    const isoTimePart = new Date().toISOString().split('T')[1] ?? '';
     this.record.events.push({
-      timestamp: new Date().toISOString().split('T')[1].replace('Z', ''),
+      timestamp: isoTimePart.replace('Z', ''),
       module: moduleName,
       location,
       status,
@@ -63,78 +155,21 @@ export class ExecutionTracer {
     });
   }
 
-  async commitAndSavePdf() {
+  async commitAndSaveXml() {
     ensureDirs();
     const bucket = this.sessionType === 'test' ? sessionRecords.test : sessionRecords.chat;
     bucket.push(this.record);
 
     const targetDir = this.sessionType === 'test' ? TEST_REPORTS_DIR : CHAT_REPORTS_DIR;
-    const fileName = `${this.sessionType}_report_${SESSION_ID}.pdf`;
+    const fileName = `${this.sessionType}_report_${SESSION_ID}.xml`;
     const filePath = path.join(targetDir, fileName);
 
-    return new Promise((resolve, reject) => {
-      const doc = new PDFDocument({ margin: 40, size: 'A4' });
-      const stream = fs.createWriteStream(filePath);
+    const xmlContent = buildSessionXml(this.sessionType, bucket);
+    await fs.promises.writeFile(filePath, xmlContent, 'utf8');
+    return filePath;
+  }
 
-      doc.pipe(stream);
-      if (fs.existsSync(FONT_PATH)) doc.font(FONT_PATH);
-
-      // Шапка общего отчёта
-      doc.fontSize(16).fillColor('#111827')
-         .text(`Конструкт АИ — Сводный отчёт (${this.sessionType === 'test' ? 'ТЕСТЫ' : 'ЧАТ'})`);
-      doc.fontSize(9).fillColor('#6B7280')
-         .text(`Сессия запуска: ${SESSION_ID} | Всего запросов в отчёте: ${bucket.length}`);
-      doc.moveDown(1);
-
-      bucket.forEach((rec, idx) => {
-        // Разделитель между запросами
-        doc.moveTo(40, doc.y).lineTo(555, doc.y).strokeColor('#D1D5DB').stroke();
-        doc.moveDown(0.5);
-
-        doc.fontSize(12).fillColor('#1D4ED8')
-           .text(`#${idx + 1} [${rec.time}] Режим: ${rec.mode}`);
-        doc.moveDown(0.3);
-
-        // 1. Запрос пользователя
-        doc.fontSize(10).fillColor('#111827').text(`Запрос пользователя: `, { continued: true })
-           .fillColor('#374151').text(rec.userQuery || '(пусто)');
-        doc.moveDown(0.3);
-
-        // 2. Действия с инструментами (что сделал и куда)
-        if (rec.actions.length > 0) {
-          doc.fontSize(10).fillColor('#111827').text('Выполненные действия:');
-          for (const act of rec.actions) {
-            const color = act.status === 'OK' ? '#059669' : '#DC2626';
-            doc.fontSize(9.5).fillColor(color)
-               .text(`  • Шаг ${act.step} [${act.tool}] -> Путь: ${act.targetPath || 'не указан'} | Статус: ${act.status} (${act.details})`);
-          }
-          doc.moveDown(0.3);
-        }
-
-        // 3. Финальный ответ в чат
-        doc.fontSize(10).fillColor('#111827').text('Ответ агента в чат:');
-        doc.fontSize(9.5).fillColor('#1F2937')
-           .text(rec.finalChatResponse || '(нет текстового ответа)', { indent: 10 });
-        doc.moveDown(0.4);
-
-        // 4. Техническая трассировка модулей
-        doc.fontSize(9).fillColor('#4B5563').text('Трассировка модулей:');
-        for (const ev of rec.events) {
-          const stColor = ev.status === 'ERROR' ? '#DC2626' : ev.status === 'RETRY' ? '#D97706' : '#059669';
-          if (fs.existsSync(MONO_FONT_PATH)) doc.font(MONO_FONT_PATH);
-          doc.fontSize(8).fillColor(stColor)
-             .text(`  [${ev.timestamp}] [${ev.status}] ${ev.module} -> ${ev.location}: ${ev.details}`);
-          if (ev.codeSnippet) {
-            doc.fillColor('#6B7280').text(`      ${ev.codeSnippet.replace(/\n/g, ' ')}`);
-          }
-        }
-        if (fs.existsSync(FONT_PATH)) doc.font(FONT_PATH);
-        doc.moveDown(0.8);
-      });
-
-      doc.end();
-      stream.on('finish', () => resolve(filePath));
-      stream.on('error', reject);
-    });
+  async commitAndSavePdf() {
+    return this.commitAndSaveXml();
   }
 }
