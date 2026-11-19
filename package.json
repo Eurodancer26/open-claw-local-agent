@@ -1,24 +1,21 @@
 {
   "name": "open-claw-local-agent",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Локальный автономный AI-агент «Конструкт АИ» на Node.js и node-llama-cpp с маршрутизацией на CPU, Plan & Execute и самокоррекцией",
+  "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test",
-    "test:llm": "cross-env RUN_LLM_TESTS=true node --test tests/run-all.test.js"
+    "test": "node -e \"import('node:fs').then(fs=>fs.mkdirSync('reports/tests',{recursive:true}));\" && node --test --test-reporter=junit > reports/tests/test-report.xml",
+    "test:llm": "node -e \"import('node:fs').then(fs=>fs.mkdirSync('reports/tests',{recursive:true}));\" && node -e \"process.env.RUN_LLM_TESTS='true'; import('node:child_process').then(({spawnSync})=>{const r=spawnSync(process.execPath,['--test','--test-reporter=junit','tests/run-all.test.js'],{env:process.env,encoding:'utf8'}); require('node:fs').writeFileSync('reports/tests/test-llm-report.xml', r.stdout || ''); if(r.stderr) process.stderr.write(r.stderr); process.exit(r.status ?? 1);});\"",
+    "dump": "npx repomix@latest"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "express": "^5.3.0",
     "node-llama-cpp": "^3.22.3",
-    "pdfkit": "^0.20.2",
     "zod": "^4.6.7"
-  },
-  "devDependencies": {
-    "cross-env": "^10.1.0"
   }
 }

@@ -4,6 +4,8 @@ import path from 'path';
 const MIND_DIR = path.resolve(process.cwd(), 'mind');
 const REFLECTIONS_DIR = path.join(MIND_DIR, 'reflections');
 const STATE_FILE = path.join(MIND_DIR, 'state.json');
+const MAX_THOUGHT_STACK = 10;
+const MAX_REFLECTION_FILES = 30;
 
 const DEFAULT_STATE = {
   coreGoal: 'Ожидание первой задачи',
@@ -22,6 +24,21 @@ async function ensureMindDirs() {
     }
   } catch (err) {
     console.error('Ошибка инициализации папки mind:', err);
+  }
+}
+
+async function pruneOldReflections(maxFiles = MAX_REFLECTION_FILES) {
+  try {
+    const entries = await fs.readdir(REFLECTIONS_DIR);
+    const mdFiles = entries.filter((f) => f.endsWith('.md')).sort();
+    if (mdFiles.length <= maxFiles) return;
+
+    const toDelete = mdFiles.slice(0, mdFiles.length - maxFiles);
+    await Promise.all(
+      toDelete.map((file) => fs.rm(path.join(REFLECTIONS_DIR, file), { force: true }).catch(() => {}))
+    );
+  } catch (err) {
+    console.error('Ошибка очистки старых рефлексий:', err);
   }
 }
 
@@ -72,9 +89,10 @@ export async function pushRecursiveThought(thoughtText, depth = 1, isError = fal
     const newStack = [
       { depth, file: fileName, preview: cleanText.slice(0, 100), isError },
       ...(state.thoughtStack || [])
-    ].slice(0, 10);
+    ].slice(0, MAX_THOUGHT_STACK);
 
     await updateMindState({ thoughtStack: newStack });
+    await pruneOldReflections(MAX_REFLECTION_FILES);
   } catch (err) {
     console.error('Ошибка записи рекурсивной мысли:', err);
   }

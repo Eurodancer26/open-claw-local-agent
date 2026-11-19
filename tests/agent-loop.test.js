@@ -115,7 +115,7 @@ describe('Конструкт АИ — Сквозной тест агентичн
 
       // 1. Проверяем корректность завершения SSE-потока
       assert.equal(receivedDoneMarker, true, 'SSE-поток должен завершиться маркером [DONE]');
-      assert.ok(fullStreamLog.includes('План составлен'), 'Агент должен сообщить о составлении плана');
+      assert.ok(fullStreamLog.includes('План принят'), 'Агент должен сообщить о принятии плана');
 
       // 2. Проверяем, что файл РЕАЛЬНО создан на диске в песочнице
       const fileContentOnDisk = await fs.readFile(path.resolve(targetFile), 'utf8');

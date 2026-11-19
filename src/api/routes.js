@@ -15,12 +15,51 @@ let modelInstance = null;
 let contextInstance = null;
 let persistentSession = null;
 let lastActiveMode = null; // Для отслеживания смены режима и сброса кэша сессии
+let sessionTurnCount = 0; // Счётчик ходов в текущей LLM-сессии для защиты от переполнения контекста
+
+const MAX_CONTEXT_MESSAGES = 12;
+const MAX_CHARS_PER_MESSAGE = 2000;
+const MAX_SESSION_TURNS = 10;
 
 // 🧠 Инициализация нейро-роутера («мозжечка»)
 const neuralRouter = new NeuralSkillRouter();
 neuralRouter.load().catch(() => {
   console.log('🧠 Нейро-роутер: используются стандартные веса по умолчанию');
 });
+
+/**
+ * Обрезка истории диалога (Context Pruning) для защиты контекстного окна модели
+ */
+function pruneMessages(messages, maxMessages = MAX_CONTEXT_MESSAGES, maxCharsPerMessage = MAX_CHARS_PER_MESSAGE) {
+  if (!Array.isArray(messages)) return [];
+
+  const normalized = messages
+    .filter((msg) => msg && typeof msg.content === 'string' && msg.content.trim().length > 0)
+    .map((msg) => {
+      const content = msg.content.trim();
+      const clipped = content.length > maxCharsPerMessage
+        ? `${content.slice(0, maxCharsPerMessage)}\n...[обрезано для экономии контекста]`
+        : content;
+      return {
+        role: msg.role === 'assistant' || msg.role === 'system' ? msg.role : 'user',
+        content: clipped
+      };
+    });
+
+  return normalized.slice(-maxMessages);
+}
+
+/**
+ * Формирует краткую сводку последних реплик диалога, если сессия была обновлена
+ */
+function buildRecentHistoryBlock(prunedMessages) {
+  if (prunedMessages.length <= 1) return '';
+  const historySlice = prunedMessages.slice(0, -1).slice(-6);
+  const formatted = historySlice
+    .map((m) => `${m.role === 'assistant' ? 'Ассистент' : 'Пользователь'}: ${m.content}`)
+    .join('\n');
+  return `\nКРАТКИЙ КОНТЕКСТ ПОСЛЕДНИХ СООБЩЕНИЙ ДИАЛОГА:\n${formatted}\n`;
+}
 
 async function getPersistentSession(forceReset = false) {
   if (!llamaInstance) {
@@ -31,13 +70,19 @@ async function getPersistentSession(forceReset = false) {
       sequences: 4
     });
   }
+
   const currentModeStr = sandboxConfig.strictDefault ? 'strict' : 'free';
-  if (forceReset || !persistentSession || lastActiveMode !== currentModeStr) {
+  const contextLimitReached = sessionTurnCount >= MAX_SESSION_TURNS;
+
+  if (forceReset || !persistentSession || lastActiveMode !== currentModeStr || contextLimitReached) {
     persistentSession = new LlamaChatSession({
       contextSequence: contextInstance.getSequence()
     });
     lastActiveMode = currentModeStr;
+    sessionTurnCount = 0;
   }
+
+  sessionTurnCount++;
   return persistentSession;
 }
 
@@ -138,6 +183,14 @@ async function askModelToFixStep(step, errorMessage, session, tracer) {
 
 router.post('/v1/chat/completions', async (req, res) => {
   await gpuMutex.acquire();
+  let mutexReleased = false;
+  const releaseGpuOnce = () => {
+    if (!mutexReleased) {
+      mutexReleased = true;
+      gpuMutex.release();
+    }
+  };
+
   let session = null;
   const isTestRun = process.env.RUN_LLM_TESTS === 'true';
   const tracer = new ExecutionTracer(isTestRun ? 'test' : 'chat');
@@ -151,15 +204,22 @@ router.post('/v1/chat/completions', async (req, res) => {
       modeChanged = true;
     }
 
-    if (!Array.isArray(messages) || messages.length === 0) {
-      gpuMutex.release();
+    const prunedMessages = pruneMessages(messages);
+    if (prunedMessages.length === 0) {
+      releaseGpuOnce();
       return res.status(400).json({ error: { message: 'Пустой массив messages', code: 400 } });
     }
 
-    const userMessage = messages[messages.length - 1].content;
+    const userMessage = prunedMessages[prunedMessages.length - 1].content;
+    const recentHistoryBlock = buildRecentHistoryBlock(prunedMessages);
     const currentMode = sandboxConfig.strictDefault ? 'strict' : 'free';
     tracer.setContext(currentMode, userMessage);
-    tracer.log('routes.js', 'POST /v1/chat/completions', 'INFO', `stream=${stream}, mode=${currentMode}, reset=${modeChanged}`);
+    tracer.log(
+      'routes.js',
+      'POST /v1/chat/completions',
+      'INFO',
+      `stream=${stream}, mode=${currentMode}, reset=${modeChanged}, prunedCount=${prunedMessages.length}`
+    );
 
     // 🧠 Прогоняем пользовательский запрос через наш рекурсивный нейро-роутер на CPU
     const routingDecision = neuralRouter.predict(userMessage);
@@ -177,10 +237,10 @@ router.post('/v1/chat/completions', async (req, res) => {
     session = await getPersistentSession(modeChanged);
 
     if (!stream) {
-      const prompt = `ТЕКУЩИЙ РЕЖИМ РАБОТЫ: ${currentMode.toUpperCase()} (${sandboxConfig.strictDefault ? 'Строго внутри tests/sandbox/' : 'Свободный доступ по всему проекту'}).\n\n${getToolsSystemPrompt()}\n\nАНАЛИЗ НЕЙРО-МОЗЖЕЧКА: Выбранный скил: ${routingDecision.selectedSkill} (${(routingDecision.confidence * 100).toFixed(0)}%).\n\n${mindSummary}\n\nЗапрос: ${userMessage}`;
+      const prompt = `ТЕКУЩИЙ РЕЖИМ РАБОТЫ: ${currentMode.toUpperCase()} (${sandboxConfig.strictDefault ? 'Строго внутри tests/sandbox/' : 'Свободный доступ по всему проекту'}).\n\n${getToolsSystemPrompt()}\n\nАНАЛИЗ НЕЙРО-МОЗЖЕЧКА: Выбранный скил: ${routingDecision.selectedSkill} (${(routingDecision.confidence * 100).toFixed(0)}%).\n\n${mindSummary}${recentHistoryBlock}\nЗапрос: ${userMessage}`;
       
       const responseText = await session.prompt(prompt);
-      gpuMutex.release();
+      releaseGpuOnce();
       const cleanResp = responseText.trim();
       tracer.setFinalResponse(cleanResp);
       tracer.log('routes.js', 'session.prompt (non-stream)', 'OK', 'Ответ сформирован');
@@ -218,7 +278,7 @@ ${sandboxConfig.strictDefault ? '-> ВНИМАНИЕ: Включен строг�
 ${getToolsSystemPrompt()}
 АНАЛИЗ НЕЙРО-МОЗЖЕЧКА: Предварительно определенный скил: ${routingDecision.selectedSkill} (${(routingDecision.confidence * 100).toFixed(0)}%).
 ОПЫТ ПРОШЛЫХ ОШИБОК:
-${mindSummary}
+${mindSummary}${recentHistoryBlock}
 Запрос пользователя: ${userMessage}
 ПРАВИЛА ОТВЕТА:
 1. Если это обычный вопрос, отказ из-за ограничений песочницы или уточнение папки в свободном режиме отвечай ТОЛЬКО чистым текстом на русском языке без JSON.
@@ -231,7 +291,7 @@ ${mindSummary}
 Твой ответ:`;
 
     const modelResponse = await session.prompt(cognitivePrompt);
-    gpuMutex.release();
+    releaseGpuOnce();
     tracer.setModelPlan(modelResponse);
     tracer.log('routes.js', 'session.prompt (stream)', 'OK', 'Получен ответ от модели');
 
@@ -310,7 +370,7 @@ ${mindSummary}
     }
     res.end();
   } finally {
-    gpuMutex.release();
+    releaseGpuOnce();
   }
 });
 
