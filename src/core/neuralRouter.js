@@ -312,6 +312,62 @@ export class NeuralSkillRouter {
     return this.predict(userText);
   }
 
+  /**
+   * Мягкое онлайн-дообучение по фактическому результату выполнения запроса.
+   * Не искажает диалоговую память (hiddenState) текущего разговора.
+   */
+  reinforceOutcome(userText, actualSkill, learningRate = 0.035) {
+    const targetIndex = this.skills.indexOf(actualSkill);
+    if (targetIndex === -1 || !userText || typeof userText !== 'string') {
+      return { updated: false, reason: 'invalid_input' };
+    }
+
+    const savedHidden = [...this.hiddenState];
+    try {
+      const currentPrediction = this.predict(userText);
+      const isMismatch = currentPrediction.selectedSkill !== actualSkill;
+      const isLowConfidence = currentPrediction.confidence < 0.72;
+
+      if (!isMismatch && !isLowConfidence) {
+        return {
+          updated: false,
+          reason: 'already_confident',
+          selectedSkill: currentPrediction.selectedSkill,
+          confidence: currentPrediction.confidence
+        };
+      }
+
+      const probs = [
+        currentPrediction.scores.chat,
+        currentPrediction.scores.file_ops,
+        currentPrediction.scores.system_cmd
+      ];
+
+      for (let k = 0; k < this.skills.length; k++) {
+        const targetVal = k === targetIndex ? 1 : 0;
+        const error = targetVal - probs[k];
+
+        this.By[k] = Number((this.By[k] + learningRate * error).toFixed(6));
+        for (let i = 0; i < this.hiddenSize; i++) {
+          this.Why[k][i] = Number((this.Why[k][i] + learningRate * error * this.hiddenState[i]).toFixed(6));
+        }
+      }
+
+      this.hiddenState = [...savedHidden];
+      const afterPrediction = this.predict(userText);
+
+      return {
+        updated: true,
+        previousSkill: currentPrediction.selectedSkill,
+        previousConfidence: currentPrediction.confidence,
+        actualSkill,
+        newConfidence: afterPrediction.confidence
+      };
+    } finally {
+      this.hiddenState = savedHidden;
+    }
+  }
+
   trainBatch(samples, epochs = 3, learningRate = 0.04) {
     if (!Array.isArray(samples) || samples.length === 0) return;
 

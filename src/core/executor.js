@@ -68,7 +68,38 @@ function formatToolOutput(toolName, result) {
 }
 
 /**
- * Последовательный исполнитель шагов плана с поддержкой самокоррекции и защиты от циклов.
+ * Подставляет результаты предыдущих шагов по плейсхолдерам вида {{step1.output}} или {{step1}}
+ */
+function interpolateStepValue(value, resultsByStep) {
+  if (typeof value === 'string') {
+    return value.replace(/\{\{\s*step(\d+)(?:\.output)?\s*\}\}/gi, (match, stepNumStr) => {
+      const stepNum = Number.parseInt(stepNumStr, 10);
+      const prev = resultsByStep.get(stepNum);
+      if (!prev || typeof prev.output !== 'string') {
+        return match;
+      }
+      return prev.output;
+    });
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => interpolateStepValue(item, resultsByStep));
+  }
+
+  if (value && typeof value === 'object') {
+    const nextObj = {};
+    for (const [k, v] of Object.entries(value)) {
+      nextObj[k] = interpolateStepValue(v, resultsByStep);
+    }
+    return nextObj;
+  }
+
+  return value;
+}
+
+/**
+ * Последовательный исполнитель шагов плана с пробросом результатов между шагами,
+ * поддержкой самокоррекции и защиты от циклов.
  */
 export async function executePlan(
   plan,
@@ -87,20 +118,31 @@ export async function executePlan(
   }
 
   const results = [];
+  const resultsByStep = new Map();
   const seenSignatures = new Set();
 
   for (let i = 0; i < plan.length; i += 1) {
-    let step = normalizeStep(plan[i], i);
-    if (!step || !step.tool) {
+    const normalizedInitial = normalizeStep(plan[i], i);
+    if (!normalizedInitial || !normalizedInitial.tool) {
       const errMsg = `Некорректный шаг плана на позиции ${i + 1}`;
       return { success: false, error: errMsg, results };
     }
+
+    let step = {
+      ...normalizedInitial,
+      arguments: interpolateStepValue(normalizedInitial.arguments, resultsByStep)
+    };
 
     let attempts = 0;
     let stepCompleted = false;
     let wasCorrected = false;
 
     while (!stepCompleted) {
+      step = {
+        ...step,
+        arguments: interpolateStepValue(step.arguments, resultsByStep)
+      };
+
       const signature = JSON.stringify({ tool: step.tool, arguments: step.arguments });
       if (attempts > 0 && seenSignatures.has(signature)) {
         const loopErr = `Loop Guard: повторный идентичный шаг "${step.tool}" без прогресса`;
@@ -141,7 +183,7 @@ export async function executePlan(
 
         if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
           attempts += 1;
-          const fixedRaw = await fixStepCallback(step, unknownToolErr, session);
+          const fixedRaw = await fixStepCallback(step, unknownToolErr, session, results);
           const normalizedFixed = normalizeStep(fixedRaw, i);
           if (normalizedFixed && normalizedFixed.tool) {
             step = { ...normalizedFixed, step: step.step };
@@ -171,7 +213,7 @@ export async function executePlan(
             }
 
             attempts += 1;
-            const fixedRaw = await fixStepCallback(step, toolErr, session);
+            const fixedRaw = await fixStepCallback(step, toolErr, session, results);
             const normalizedFixed = normalizeStep(fixedRaw, i);
             if (normalizedFixed && normalizedFixed.tool) {
               step = { ...normalizedFixed, step: step.step };
@@ -197,12 +239,15 @@ export async function executePlan(
           ? `[Исправлено через ${step.tool}] ${rawFormatted}`
           : rawFormatted;
 
-        results.push({
+        const stepRecord = {
           step: step.step,
           tool: step.tool,
           success: true,
           output: finalOutput
-        });
+        };
+
+        results.push(stepRecord);
+        resultsByStep.set(step.step, stepRecord);
 
         if (typeof onProgress === 'function') {
           onProgress({
@@ -230,7 +275,7 @@ export async function executePlan(
           }
 
           attempts += 1;
-          const fixedRaw = await fixStepCallback(step, caughtErr, session);
+          const fixedRaw = await fixStepCallback(step, caughtErr, session, results);
           const normalizedFixed = normalizeStep(fixedRaw, i);
           if (normalizedFixed && normalizedFixed.tool) {
             step = { ...normalizedFixed, step: step.step };

@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import { getLlama, LlamaChatSession } from 'node-llama-cpp';
-import path from 'path';
+import { initLlamaEngine } from '../core/engine.js';
 import { getToolsSystemPrompt, sandboxConfig } from '../tools/registry.js';
 import { executePlan } from '../core/executor.js';
 import { initMind, updateMindState, pushRecursiveThought, getMindContextSummary } from '../core/recursiveMind.js';
@@ -13,43 +12,39 @@ import { formatStepResultForChat, buildNonStreamPrompt, buildCognitivePrompt } f
 
 const router = Router();
 
-let llamaInstance = null;
-let modelInstance = null;
-let contextInstance = null;
-let persistentSession = null;
-let lastActiveMode = null;
-let sessionTurnCount = 0;
-
-const MAX_SESSION_TURNS = 10;
-
 const neuralRouter = new NeuralSkillRouter();
 neuralRouter.load().catch(() => {
   console.log('🧠 Нейро-роутер: используются стандартные веса по умолчанию');
 });
 
-async function getPersistentSession(forceReset = false) {
-  if (!llamaInstance) {
-    llamaInstance = await getLlama();
-    const modelPath = path.resolve(process.cwd(), 'models', 'qwen2.5-7b-instruct-q4_k_m.gguf');
-    modelInstance = await llamaInstance.loadModel({ modelPath });
-    contextInstance = await modelInstance.createContext({
-      sequences: 4
-    });
+function inferActualSkillFromPlan(plan) {
+  if (!Array.isArray(plan) || plan.length === 0) {
+    return 'chat';
+  }
+  const allSystemCmd = plan.every((step) => step && step.tool === 'runCommand');
+  return allSystemCmd ? 'system_cmd' : 'file_ops';
+}
+
+async function applyRouterFeedback(userMessage, actualSkill, tracer, isTestRun) {
+  const feedback = neuralRouter.reinforceOutcome(userMessage, actualSkill);
+  if (!feedback.updated) {
+    return;
   }
 
-  const currentModeStr = sandboxConfig.strictDefault ? 'strict' : 'free';
-  const contextLimitReached = sessionTurnCount >= MAX_SESSION_TURNS;
+  tracer.log(
+    'routes.js',
+    'NeuralRouter.reinforceOutcome',
+    'INFO',
+    `Дообучение роутера: ${feedback.previousSkill} (${(feedback.previousConfidence * 100).toFixed(1)}%) -> ${feedback.actualSkill} (${(feedback.newConfidence * 100).toFixed(1)}%)`
+  );
 
-  if (forceReset || !persistentSession || lastActiveMode !== currentModeStr || contextLimitReached) {
-    persistentSession = new LlamaChatSession({
-      contextSequence: contextInstance.getSequence()
-    });
-    lastActiveMode = currentModeStr;
-    sessionTurnCount = 0;
+  if (!isTestRun) {
+    try {
+      await neuralRouter.save();
+    } catch (err) {
+      tracer.log('routes.js', 'NeuralRouter.save', 'ERROR', `Не удалось сохранить веса роутера: ${err.message}`);
+    }
   }
-
-  sessionTurnCount++;
-  return persistentSession;
 }
 
 async function askModelToFixStep(step, errorMessage, session, tracer) {
@@ -124,7 +119,12 @@ router.post('/v1/chat/completions', async (req, res) => {
     );
 
     const routingDecision = neuralRouter.predict(userMessage);
-    tracer.log('routes.js', 'NeuralRouter', 'INFO', `Мозжечок определил скил: ${routingDecision.selectedSkill} (уверенность: ${(routingDecision.confidence * 100).toFixed(1)}%)`);
+    tracer.log(
+      'routes.js',
+      'NeuralRouter',
+      'INFO',
+      `Мозжечок определил скил: ${routingDecision.selectedSkill} (уверенность: ${(routingDecision.confidence * 100).toFixed(1)}%)`
+    );
 
     await initMind();
     await updateMindState((st) => ({
@@ -136,7 +136,10 @@ router.post('/v1/chat/completions', async (req, res) => {
     const mindSummary = await getMindContextSummary();
     const modeBadge = sandboxConfig.strictDefault ? '[Песочница]' : '[Свободный режим]';
     const toolsPrompt = getToolsSystemPrompt();
-    session = await getPersistentSession(modeChanged);
+    session = await initLlamaEngine({
+      forceReset: modeChanged,
+      mode: currentMode
+    });
 
     if (!stream) {
       const prompt = buildNonStreamPrompt({
@@ -203,6 +206,7 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     if (!isJsonPlan) {
       const cleanText = modelResponse.trim();
+      await applyRouterFeedback(userMessage, 'chat', tracer, isTestRun);
       await pushRecursiveThought(`Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`, 1, false);
       sendSSE({ choices: [{ delta: { content: `\n${cleanText}\n` } }] });
       tracer.setFinalResponse(chatTranscript.trim());
@@ -253,11 +257,13 @@ router.post('/v1/chat/completions', async (req, res) => {
       plan,
       progressCallback,
       session,
-      (step, err, sess) => askModelToFixStep(step, err, sess, tracer),
+      (step, err, sess, prevResults) => askModelToFixStep(step, err, sess, tracer, prevResults),
       true
     );
 
     if (executionReport.success) {
+      const actualSkill = inferActualSkillFromPlan(plan);
+      await applyRouterFeedback(userMessage, actualSkill, tracer, isTestRun);
       tracer.log('routes.js', 'ExecutionComplete', 'OK', 'Все шаги выполнены');
       sendSSE({ choices: [{ delta: { content: '\n✨ Готово!\n' } }] });
     } else {
@@ -267,8 +273,8 @@ router.post('/v1/chat/completions', async (req, res) => {
     }
 
     tracer.setFinalResponse(chatTranscript.trim());
-    const pdfPath = await tracer.commitAndSavePdf();
-    console.log(`📄 Сводный PDF-отчёт обновлён: ${pdfPath}`);
+    const reportPath = await tracer.commitAndSavePdf();
+    console.log(`📄 Сводный отчёт обновлён: ${reportPath}`);
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (error) {
@@ -287,9 +293,47 @@ router.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
+router.post('/v1/session/reset', async (req, res) => {
+  await gpuMutex.acquire();
+  try {
+    const { strictSandbox } = req.body || {};
+    if (typeof strictSandbox === 'boolean') {
+      sandboxConfig.strictDefault = strictSandbox;
+    }
+
+    const currentMode = sandboxConfig.strictDefault ? 'strict' : 'free';
+    neuralRouter.resetMemory();
+
+    await initMind();
+    await updateMindState((st) => ({
+      ...st,
+      coreGoal: 'Ожидание новой задачи после сброса сессии',
+      mode: currentMode
+    }));
+
+    await initLlamaEngine({
+      forceReset: true,
+      mode: currentMode
+    });
+
+    res.json({
+      success: true,
+      mode: currentMode,
+      strictSandbox: sandboxConfig.strictDefault
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    gpuMutex.release();
+  }
+});
+
 router.get('/v1/mind', async (req, res) => {
   const mindData = await initMind();
-  res.json(mindData);
+  res.json({
+    ...mindData,
+    strictSandbox: sandboxConfig.strictDefault
+  });
 });
 
 export default router;
