@@ -5,6 +5,24 @@
   "thoughtStack": [
     {
       "depth": 1,
+      "file": "thought_1795178876202_d1.md",
+      "preview": "Запрос: Попытайся прочитать файл \"tests/sandbox/unified-correction.txt\". Если его нет, создай его с ",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1795178871074_d1.md",
+      "preview": "Запрос: Создай файл \"tests/sandbox/unified-agent-test.txt\" с текстом \"Единый тест пройден!\" и прочит",
+      "isError": false
+    },
+    {
+      "depth": 1,
+      "file": "thought_1795178865960_d1.md",
+      "preview": "Запрос: Напиши слово: привет -> Ответ: привет",
+      "isError": false
+    },
+    {
+      "depth": 1,
       "file": "thought_1795157585179_d1.md",
       "preview": "Запрос: Попытайся прочитать файл \"tests/sandbox/unified-correction.txt\". Если его нет, создай его с ",
       "isError": false
@@ -43,24 +61,6 @@
       "depth": 1,
       "file": "thought_1795095576825_d1.md",
       "preview": "Запрос: Создай файл \"tests/sandbox/calc.js\" с функцией умножения двух чисел, затем создай файл \"test",
-      "isError": false
-    },
-    {
-      "depth": 1,
-      "file": "thought_1795095425800_d1.md",
-      "preview": "Запрос: Прочитай файл tests/sandbox/sample-calc.test.js и покажи его содержимое. -> План из 1 шагов",
-      "isError": false
-    },
-    {
-      "depth": 1,
-      "file": "thought_1795095394536_d1.md",
-      "preview": "Запрос: Сгенерируй unit-тест для файла tests/sandbox/sample-calc.js и сохрани в tests/sandbox/sample",
-      "isError": false
-    },
-    {
-      "depth": 1,
-      "file": "thought_1795095341811_d1.md",
-      "preview": "Запрос: Проанализируй папку tests/sandbox и расскажи краткую статистику по файлам и строкам. -> План",
       "isError": false
     }
   ]

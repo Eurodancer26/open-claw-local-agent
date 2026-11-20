@@ -4,8 +4,8 @@ const chatMessages = document.getElementById('chat-messages');
 const sendBtn = document.getElementById('send-btn');
 const sandboxToggle = document.getElementById('sandbox-toggle');
 const sandboxModeLabel = document.getElementById('sandbox-mode-label');
+const resetSessionBtn = document.getElementById('reset-session-btn');
 
-// Локальный массив истории сообщений для передачи контекста агенту
 const MAX_HISTORY_MESSAGES = 12;
 let messageHistory = [];
 
@@ -25,8 +25,25 @@ function updateSandboxLabel() {
   }
 }
 
+async function syncMindState() {
+  try {
+    const res = await fetch('/v1/mind');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.strictSandbox === 'boolean') {
+      sandboxToggle.checked = data.strictSandbox;
+    } else if (data.mode === 'strict' || data.mode === 'free') {
+      sandboxToggle.checked = data.mode === 'strict';
+    }
+    updateSandboxLabel();
+  } catch {
+    updateSandboxLabel();
+  }
+}
+
 sandboxToggle.addEventListener('change', updateSandboxLabel);
 updateSandboxLabel();
+syncMindState();
 
 function appendMessage(role, text = '') {
   const wrapper = document.createElement('div');
@@ -42,6 +59,41 @@ function appendMessage(role, text = '') {
   return bubble;
 }
 
+function renderWelcomeMessage() {
+  chatMessages.innerHTML = '';
+  const modeText = sandboxToggle.checked
+    ? 'строгий режим песочницы — все файлы автоматически изолируются в tests/sandbox/.'
+    : 'свободный режим — разрешена работа в пределах проекта с уточнением целевой папки.';
+
+  appendMessage(
+    'assistant',
+    `Привет! Я твой локальный агент. Напиши задачу, и я разобью её на шаги, выполню и выведу результат.\n\nСейчас включен ${modeText}`
+  );
+}
+
+resetSessionBtn.addEventListener('click', async () => {
+  resetSessionBtn.disabled = true;
+  sendBtn.disabled = true;
+  userInput.disabled = true;
+
+  try {
+    await fetch('/v1/session/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strictSandbox: sandboxToggle.checked })
+    });
+    messageHistory = [];
+    renderWelcomeMessage();
+  } catch (err) {
+    appendMessage('assistant', `❌ Не удалось сбросить сессию: ${err.message}`);
+  } finally {
+    resetSessionBtn.disabled = false;
+    sendBtn.disabled = false;
+    userInput.disabled = false;
+    userInput.focus();
+  }
+});
+
 chatForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = userInput.value.trim();
@@ -54,6 +106,7 @@ chatForm.addEventListener('submit', async (e) => {
   userInput.value = '';
   userInput.disabled = true;
   sendBtn.disabled = true;
+  resetSessionBtn.disabled = true;
 
   const assistantBubble = appendMessage('assistant', '');
   let fullAssistantResponse = '';
@@ -63,7 +116,7 @@ chatForm.addEventListener('submit', async (e) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messages: messageHistory, // Передаем обрезанную актуальную историю диалога
+        messages: messageHistory,
         stream: true,
         strictSandbox: sandboxToggle.checked
       })
@@ -106,17 +159,16 @@ chatForm.addEventListener('submit', async (e) => {
       }
     }
 
-    // Сохраняем ответ ассистента в историю и следим за лимитом контекста
     if (fullAssistantResponse) {
       messageHistory.push({ role: 'assistant', content: fullAssistantResponse });
       trimHistory();
     }
-
   } catch (err) {
     assistantBubble.textContent += `\n❌ Ошибка: ${err.message}`;
   } finally {
     userInput.disabled = false;
     sendBtn.disabled = false;
+    resetSessionBtn.disabled = false;
     userInput.focus();
   }
 });

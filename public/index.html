@@ -17,12 +17,18 @@
         </div>
       </div>
 
-      <div class="sandbox-control" title="В строгом режиме все файлы создаются и удаляются исключительно внутри tests/sandbox/">
-        <span class="sandbox-control__label" id="sandbox-mode-label">🔒 Песочница (Строго)</span>
-        <label class="switch">
-          <input type="checkbox" id="sandbox-toggle" checked />
-          <span class="switch__slider"></span>
-        </label>
+      <div class="header__actions">
+        <div class="sandbox-control" title="В строгом режиме все файлы создаются и удаляются исключительно внутри tests/sandbox/">
+          <span class="sandbox-control__label" id="sandbox-mode-label">🔒 Песочница (Строго)</span>
+          <label class="switch">
+            <input type="checkbox" id="sandbox-toggle" checked />
+            <span class="switch__slider"></span>
+          </label>
+        </div>
+
+        <button type="button" class="reset-btn" id="reset-session-btn" title="Очистить историю чата и сбросить сессию модели">
+          Сброс
+        </button>
       </div>
     </header>
 

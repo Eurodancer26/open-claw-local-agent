@@ -100,10 +100,18 @@ async function runTest() {
   reloadedRouter.resetMemory();
   const afterReload = reloadedRouter.predict('Покажи статус git и версию node').scores.system_cmd;
 
+  // Проверка reinforceOutcome без порчи текущего hiddenState
+  reloadedRouter.resetMemory();
+  const baselineHidden = [...reloadedRouter.predict('Привет').memorySnapshot];
+  const feedback = reloadedRouter.reinforceOutcome('Сделай краткую сводку по логам', 'file_ops', 0.1);
+  assert.equal(feedback.updated, true, 'reinforceOutcome должен обновить веса при низкой уверенности или расхождении');
+  const currentHiddenAfterReinforce = reloadedRouter.hiddenState.map((n) => Number(n.toFixed(3)));
+  assert.deepEqual(currentHiddenAfterReinforce, baselineHidden, 'reinforceOutcome не должен сбивать текущий hiddenState');
+
   await fs.unlink(tempWeightsPath).catch(() => {});
   assert.ok(afterReload >= beforeTrain, 'После обучения и перезагрузки весов score для system_cmd не должен упасть');
 
-  console.log('\n💾 Проверка save()/load() на временном файле прошла успешно!');
+  console.log('\n💾 Проверка save()/load() и reinforceOutcome() на временном файле прошла успешно!');
   console.log('✅ Все assertions для NeuralSkillRouter пройдены!');
 }
 

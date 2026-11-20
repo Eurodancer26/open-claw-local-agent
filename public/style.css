@@ -67,6 +67,12 @@ body {
   color: var(--text-muted);
 }
 
+.header__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 /* Переключатель режима песочницы */
 .sandbox-control {
   display: flex;
@@ -88,6 +94,29 @@ body {
 
 .sandbox-control__label--free {
   color: var(--sandbox-free);
+}
+
+.reset-btn {
+  background-color: var(--bg-input);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.reset-btn:hover:not(:disabled) {
+  color: var(--text-main);
+  border-color: var(--accent);
+  background-color: rgba(59, 130, 246, 0.12);
+}
+
+.reset-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .switch {
