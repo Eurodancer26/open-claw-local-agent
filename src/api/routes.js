@@ -6,7 +6,10 @@ import { executePlan } from '../core/executor.js';
 import { initMind, updateMindState, pushRecursiveThought, getMindContextSummary } from '../core/recursiveMind.js';
 import { gpuMutex } from '../core/mutex.js';
 import { ExecutionTracer } from '../core/reporter.js';
-import { NeuralSkillRouter } from '../core/neuralRouter.js'; // 🧠 Наш нейро-мозжечок
+import { NeuralSkillRouter } from '../core/neuralRouter.js';
+import { pruneMessages, buildRecentHistoryBlock } from '../core/contextPruner.js';
+import { safeParseJsonPayload, extractActionPlan } from '../core/planParser.js';
+import { formatStepResultForChat, buildNonStreamPrompt, buildCognitivePrompt } from './chatFormatter.js';
 
 const router = Router();
 
@@ -14,53 +17,15 @@ let llamaInstance = null;
 let modelInstance = null;
 let contextInstance = null;
 let persistentSession = null;
-let lastActiveMode = null; // Для отслеживания смены режима и сброса кэша сессии
-let sessionTurnCount = 0; // Счётчик ходов в текущей LLM-сессии для защиты от переполнения контекста
+let lastActiveMode = null;
+let sessionTurnCount = 0;
 
-const MAX_CONTEXT_MESSAGES = 12;
-const MAX_CHARS_PER_MESSAGE = 2000;
 const MAX_SESSION_TURNS = 10;
-const MAX_CHAT_CODE_CHARS = 4000;
 
-// 🧠 Инициализация нейро-роутера («мозжечка»)
 const neuralRouter = new NeuralSkillRouter();
 neuralRouter.load().catch(() => {
   console.log('🧠 Нейро-роутер: используются стандартные веса по умолчанию');
 });
-
-/**
- * Обрезка истории диалога (Context Pruning) для защиты контекстного окна модели
- */
-function pruneMessages(messages, maxMessages = MAX_CONTEXT_MESSAGES, maxCharsPerMessage = MAX_CHARS_PER_MESSAGE) {
-  if (!Array.isArray(messages)) return [];
-
-  const normalized = messages
-    .filter((msg) => msg && typeof msg.content === 'string' && msg.content.trim().length > 0)
-    .map((msg) => {
-      const content = msg.content.trim();
-      const clipped = content.length > maxCharsPerMessage
-        ? `${content.slice(0, maxCharsPerMessage)}\n...[обрезано для экономии контекста]`
-        : content;
-      return {
-        role: msg.role === 'assistant' || msg.role === 'system' ? msg.role : 'user',
-        content: clipped
-      };
-    });
-
-  return normalized.slice(-maxMessages);
-}
-
-/**
- * Формирует краткую сводку последних реплик диалога, если сессия была обновлена
- */
-function buildRecentHistoryBlock(prunedMessages) {
-  if (prunedMessages.length <= 1) return '';
-  const historySlice = prunedMessages.slice(0, -1).slice(-6);
-  const formatted = historySlice
-    .map((m) => `${m.role === 'assistant' ? 'Ассистент' : 'Пользователь'}: ${m.content}`)
-    .join('\n');
-  return `\nКРАТКИЙ КОНТЕКСТ ПОСЛЕДНИХ СООБЩЕНИЙ ДИАЛОГА:\n${formatted}\n`;
-}
 
 async function getPersistentSession(forceReset = false) {
   if (!llamaInstance) {
@@ -85,163 +50,6 @@ async function getPersistentSession(forceReset = false) {
 
   sessionTurnCount++;
   return persistentSession;
-}
-
-/**
- * Неубиваемый парсер JSON-плана.
- */
-function safeParseJsonPayload(rawText) {
-  if (!rawText || typeof rawText !== 'string') return null;
-  let cleaned = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
-  const firstBracket = cleaned.indexOf('[');
-  const lastBracket = cleaned.lastIndexOf(']');
-  const firstBrace = cleaned.indexOf('{');
-  const lastBrace = cleaned.lastIndexOf('}');
-  let candidate = '';
-  if (firstBracket !== -1 && lastBracket > firstBracket && (firstBrace === -1 || firstBracket < firstBrace)) {
-    candidate = cleaned.slice(firstBracket, lastBracket + 1);
-  } else if (firstBrace !== -1 && lastBrace > firstBrace) {
-    candidate = cleaned.slice(firstBrace, lastBrace + 1);
-  } else {
-    return null;
-  }
-  try {
-    return JSON.parse(candidate);
-  } catch (_) {}
-
-  const withoutTrailingCommas = candidate.replace(/,\s*([\]}])/g, '$1');
-  try {
-    return JSON.parse(withoutTrailingCommas);
-  } catch (_) {}
-
-  try {
-    const repaired = withoutTrailingCommas.replace(
-      /"(description|content|filePath|path|commandId)"\s*:\s*"([\s\S]*?)"(?=\s*,\s*"[a-zA-Z0-9_]+"|\s*\})/g,
-      (match, key, val) => {
-        const safeVal = val
-          .replace(/\\"/g, '"')
-          .replace(/"/g, '\\"')
-          .replace(/\r\n/g, '\\n');
-        return `"${key}": "${safeVal}"`;
-      }
-    );
-    return JSON.parse(repaired);
-  } catch (_) {}
-
-  try {
-    const superRepaired = withoutTrailingCommas.replace(/"description"\s*:\s*"([^"]*)"/g, (_, desc) => {
-      const cleanDesc = desc.replace(/"/g, "'");
-      return `"description": "${cleanDesc}"`;
-    });
-    return JSON.parse(superRepaired);
-  } catch (_) {}
-
-  return null;
-}
-
-function extractActionPlan(modelResponse) {
-  const parsed = safeParseJsonPayload(modelResponse);
-  if (!parsed) return [];
-  if (Array.isArray(parsed)) {
-    return parsed.filter(item => item && typeof item === 'object' && typeof item.tool === 'string');
-  }
-  if (typeof parsed === 'object' && typeof parsed.tool === 'string') {
-    return [parsed];
-  }
-  return [];
-}
-
-/**
- * Преобразует сырой результат шага в структурированный объект
- */
-function parseStepResultData(rawResult) {
-  if (!rawResult) return null;
-  if (typeof rawResult === 'object') return rawResult;
-  if (typeof rawResult === 'string') {
-    try {
-      return JSON.parse(rawResult);
-    } catch {
-      return { message: rawResult };
-    }
-  }
-  return { message: String(rawResult) };
-}
-
-/**
- * Форматирует результат выполнения инструмента для отображения пользователю в чате
- */
-function formatStepResultForChat(toolName, rawResult) {
-  if (rawResult === undefined || rawResult === null) {
-    return '✔ Успешно.\n';
-  }
-
-  const data = parseStepResultData(rawResult);
-
-  if (toolName === 'readFile') {
-    const text = typeof rawResult === 'string'
-      ? (data && typeof data.content === 'string' ? data.content : rawResult)
-      : (typeof data?.content === 'string' ? data.content : JSON.stringify(data, null, 2));
-
-    const clipped = text.length > MAX_CHAT_CODE_CHARS
-      ? `${text.slice(0, MAX_CHAT_CODE_CHARS)}\n... [обрезано, всего ${text.length} символов]`
-      : text;
-
-    return `✔ Успешно. Содержимое файла:\n\`\`\`\n${clipped}\n\`\`\`\n`;
-  }
-
-  if (toolName === 'analyzeProject') {
-    const reportObj = data?.report || (data && typeof data.totalFiles === 'number' ? data : null);
-
-    if (reportObj) {
-      const extList = Object.entries(reportObj.byExtension || {})
-        .map(([ext, count]) => `${ext}: ${count}`)
-        .join(', ') || 'нет';
-      const largestList = Array.isArray(reportObj.largestFiles) && reportObj.largestFiles.length > 0
-        ? reportObj.largestFiles.map((f) => `${f.path} (${f.lines} строк, ${f.sizeBytes} Б)`).join('; ')
-        : 'нет';
-
-      const lines = [
-        '✔ Успешно. Краткая статистика:',
-        `- Директория: \`${reportObj.target}\``,
-        `- Папок: ${reportObj.totalDirs}, файлов: ${reportObj.totalFiles}, строк кода: ${reportObj.totalLines}`,
-        `- По расширениям: ${extList}`,
-        `- Крупные файлы: ${largestList}`
-      ];
-
-      if (reportObj.packageInfo) {
-        lines.push(`- Пакет: ${reportObj.packageInfo.name}@${reportObj.packageInfo.version} (${reportObj.packageInfo.type})`);
-      }
-
-      return `${lines.join('\n')}\n`;
-    }
-
-    const summaryText = typeof rawResult === 'string' ? rawResult.trim() : JSON.stringify(data, null, 2);
-    return `✔ Успешно. Результат анализа:\n${summaryText}\n`;
-  }
-
-  if (toolName === 'listDir' && data && Array.isArray(data.items)) {
-    const listText = data.items.length > 0
-      ? data.items.map((item) => `${item.type === 'dir' ? '[dir]' : '[file]'} ${item.name}`).join(', ')
-      : 'пусто';
-    return `✔ Успешно. Элементы: ${listText}\n`;
-  }
-
-  if (data && typeof data.message === 'string' && data.message.trim().length > 0) {
-    const extraSymbols = Array.isArray(data.detectedSymbols) && data.detectedSymbols.length > 0
-      ? ` (символы: ${data.detectedSymbols.join(', ')})`
-      : '';
-    return `✔ Успешно. ${data.message}${extraSymbols}\n`;
-  }
-
-  if (typeof rawResult === 'string' && rawResult.trim().length > 0) {
-    return `✔ Успешно. ${rawResult.trim()}\n`;
-  }
-
-  if (data && typeof data.stdout === 'string' && data.stdout.trim().length > 0) {
-    return `✔ Успешно.\n\`\`\`\n${data.stdout.trim()}\n\`\`\`\n`;
-  }
-
-  return '✔ Успешно.\n';
 }
 
 async function askModelToFixStep(step, errorMessage, session, tracer) {
@@ -315,12 +123,11 @@ router.post('/v1/chat/completions', async (req, res) => {
       `stream=${stream}, mode=${currentMode}, reset=${modeChanged}, prunedCount=${prunedMessages.length}`
     );
 
-    // 🧠 Прогоняем пользовательский запрос через наш рекурсивный нейро-роутер на CPU
     const routingDecision = neuralRouter.predict(userMessage);
     tracer.log('routes.js', 'NeuralRouter', 'INFO', `Мозжечок определил скил: ${routingDecision.selectedSkill} (уверенность: ${(routingDecision.confidence * 100).toFixed(1)}%)`);
 
     await initMind();
-    await updateMindState(st => ({
+    await updateMindState((st) => ({
       ...st,
       coreGoal: userMessage,
       mode: currentMode
@@ -328,11 +135,20 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     const mindSummary = await getMindContextSummary();
     const modeBadge = sandboxConfig.strictDefault ? '[Песочница]' : '[Свободный режим]';
+    const toolsPrompt = getToolsSystemPrompt();
     session = await getPersistentSession(modeChanged);
 
     if (!stream) {
-      const prompt = `ТЕКУЩИЙ РЕЖИМ РАБОТЫ: ${currentMode.toUpperCase()} (${sandboxConfig.strictDefault ? 'Строго внутри tests/sandbox/' : 'Свободный доступ по всему проекту'}).\n\n${getToolsSystemPrompt()}\n\nАНАЛИЗ НЕЙРО-МОЗЖЕЧКА: Выбранный скил: ${routingDecision.selectedSkill} (${(routingDecision.confidence * 100).toFixed(0)}%).\n\n${mindSummary}${recentHistoryBlock}\nЗапрос: ${userMessage}`;
-      
+      const prompt = buildNonStreamPrompt({
+        currentMode,
+        strictDefault: sandboxConfig.strictDefault,
+        toolsPrompt,
+        routingDecision,
+        mindSummary,
+        recentHistoryBlock,
+        userMessage
+      });
+
       const responseText = await session.prompt(prompt);
       releaseGpuOnce();
       const cleanResp = responseText.trim();
@@ -351,7 +167,7 @@ router.post('/v1/chat/completions', async (req, res) => {
           finish_reason: 'stop'
         }],
         usage: { prompt_tokens: -1, completion_tokens: -1, total_tokens: -1 },
-        neural_routing: routingDecision // Возвращаем вердикт нейросети для отладки
+        neural_routing: routingDecision
       });
     }
 
@@ -367,22 +183,15 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     sendSSE({ choices: [{ delta: { role: 'assistant', content: `${modeBadge} Думаю...\n` } }] });
 
-    const cognitivePrompt = `ТЕКУЩИЙ АКТИВНЫЙ РЕЖИМ СИСТЕМЫ: ${currentMode.toUpperCase()}
-${sandboxConfig.strictDefault ? '-> ВНИМАНИЕ: Включен строгий режим песочницы (tests/sandbox/).' : '-> ВНИМАНИЕ: Включен СВОБОДНЫЙ режим работы по всему проекту.'}
-${getToolsSystemPrompt()}
-АНАЛИЗ НЕЙРО-МОЗЖЕЧКА: Предварительно определенный скил: ${routingDecision.selectedSkill} (${(routingDecision.confidence * 100).toFixed(0)}%).
-ОПЫТ ПРОШЛЫХ ОШИБОК:
-${mindSummary}${recentHistoryBlock}
-Запрос пользователя: ${userMessage}
-ПРАВИЛА ОТВЕТА:
-1. Если это обычный вопрос, отказ из-за ограничений песочницы или уточнение папки в свободном режиме отвечай ТОЛЬКО чистым текстом на русском языке без JSON.
-2. Если в свободном режиме пользователь не указал путь (например, "создай файл data.txt"), ты ОБЯЗАН задать вопрос текстом: "В какой именно папке создать файл?" и НЕ вызывать инструменты.
-3. Если требуется выполнить действие инструментом и все условия режима соблюдены, верни СТРОГО валидный JSON-план с обязательным объектом "arguments":
-[
-  { "step": 1, "tool": "writeFile", "arguments": { "filePath": "путь/к/файлу", "content": "содержимое" }, "description": "Создание файла" }
-]
-4. В поле "description" пиши ТОЛЬКО простой текст без кавычек и фигурных скобок!
-Твой ответ:`;
+    const cognitivePrompt = buildCognitivePrompt({
+      currentMode,
+      strictDefault: sandboxConfig.strictDefault,
+      toolsPrompt,
+      routingDecision,
+      mindSummary,
+      recentHistoryBlock,
+      userMessage
+    });
 
     const modelResponse = await session.prompt(cognitivePrompt);
     releaseGpuOnce();
@@ -410,7 +219,7 @@ ${mindSummary}${recentHistoryBlock}
     let currentStepMeta = null;
     const progressCallback = (event) => {
       if (event.type === 'step_start') {
-        const stepObj = plan.find(p => (p.step || 1) === event.step) || {};
+        const stepObj = plan.find((p) => (p.step || 1) === event.step) || {};
         const argsObj = stepObj.arguments || {};
         const target =
           argsObj.filePath ||
@@ -462,7 +271,6 @@ ${mindSummary}${recentHistoryBlock}
     console.log(`📄 Сводный PDF-отчёт обновлён: ${pdfPath}`);
     res.write('data: [DONE]\n\n');
     res.end();
-
   } catch (error) {
     console.error('Ошибка:', error);
     tracer.log('routes.js', 'GlobalCatch', 'ERROR', error.message);
