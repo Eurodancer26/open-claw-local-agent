@@ -1,3 +1,4 @@
+// src/tools/pathSecurity.js
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -9,12 +10,50 @@ export const sandboxConfig = {
   strictDefault: true // true — жёстко всё в tests/sandbox, false — свобода выбора в пределах проекта
 };
 
+function isWindowsDrivePath(p) {
+  return /^[a-zA-Z]:[\\/]/.test(p);
+}
+
+function isUncPath(p) {
+  return /^\\\\[^\\]/.test(p) || /^\/\/[^/]/.test(p);
+}
+
 /**
- * Находит ближайшую существующую родительскую директорию и проверяет её реальный путь
+ * Убирает ведущий префикс tests/sandbox (если он уже указан),
+ * чтобы избежать вложенного tests/sandbox/tests/sandbox/... в строгом режиме.
+ */
+function stripLeadingSandboxPrefix(rawPath) {
+  const slashNormalized = rawPath.replace(/\\/g, '/').trim();
+  const withoutDotSlash = slashNormalized.replace(/^(?:\.\/)+/, '');
+  const sandboxPrefix = SANDBOX_REL.replace(/\\/g, '/').replace(/^\.\/+/, '');
+
+  if (withoutDotSlash === '' || withoutDotSlash === '.' || withoutDotSlash === sandboxPrefix) {
+    return '.';
+  }
+
+  const prefixWithSlash = `${sandboxPrefix}/`;
+  if (withoutDotSlash.startsWith(prefixWithSlash)) {
+    const rest = withoutDotSlash.slice(prefixWithSlash.length);
+    return rest || '.';
+  }
+
+  return withoutDotSlash;
+}
+
+/**
+ * Находит ближайшую существующую родительскую директорию и проверяет её реальный путь.
+ * Ограничение глубины защищает от теоретических циклов на битой ФС.
  */
 async function verifyNearestExistingAncestor(targetPath, realRoot) {
   let current = path.dirname(targetPath);
+  let depth = 0;
+  const MAX_DEPTH = 64;
+
   while (true) {
+    if (depth++ > MAX_DEPTH) {
+      throw new Error('Нарушение безопасности: слишком глубокая вложенность при проверке пути.');
+    }
+
     try {
       const realCurrent = await fs.realpath(current);
       const rel = path.relative(realRoot, realCurrent);
@@ -37,28 +76,36 @@ async function verifyNearestExistingAncestor(targetPath, realRoot) {
 }
 
 /**
- * Строгая проверка безопасности пути с поддержкой жёсткого режима песочницы по умолчанию
+ * Строгая проверка безопасности пути с поддержкой жёсткого режима песочницы по умолчанию.
  */
 export async function resolveSafePath(userPath) {
   if (!userPath || typeof userPath !== 'string') {
     throw new Error('Некорректный путь: путь должен быть непустой строкой.');
   }
+  if (userPath.includes('\0')) {
+    throw new Error('Некорректный путь: содержит нулевой байт.');
+  }
 
-  let targetInput = userPath.trim();
-  const normalizedInput = path.normalize(targetInput);
+  const trimmedInput = userPath.trim();
+  if (trimmedInput.length === 0) {
+    throw new Error('Некорректный путь: пустая строка после trim.');
+  }
+
+  // Абсолютные Windows и UNC пути не имеют смысла ни в strict, ни в free режиме.
+  if (isWindowsDrivePath(trimmedInput) || isUncPath(trimmedInput)) {
+    throw new Error('Нарушение безопасности: абсолютные Windows/UNC пути запрещены.');
+  }
+
   const activeRoot = sandboxConfig.strictDefault ? SANDBOX_DIR : WORKSPACE_ROOT;
 
+  let targetInput = trimmedInput;
   if (sandboxConfig.strictDefault) {
     await fs.mkdir(SANDBOX_DIR, { recursive: true });
-    const relToSandboxPrefix = path.relative(SANDBOX_REL, normalizedInput);
-    const isAlreadyPrefixed =
-      !relToSandboxPrefix.startsWith('..') &&
-      !path.isAbsolute(relToSandboxPrefix) &&
-      (normalizedInput === SANDBOX_REL || normalizedInput.startsWith(SANDBOX_REL + path.sep));
-
-    if (!isAlreadyPrefixed) {
-      targetInput = path.join(SANDBOX_REL, normalizedInput);
+    const cleanedRel = stripLeadingSandboxPrefix(trimmedInput);
+    if (path.isAbsolute(cleanedRel)) {
+      throw new Error('Нарушение безопасности: абсолютные пути в строгом режиме запрещены.');
     }
+    targetInput = path.join(SANDBOX_REL, path.normalize(cleanedRel));
   }
 
   const absoluteTarget = path.resolve(WORKSPACE_ROOT, targetInput);
@@ -72,8 +119,14 @@ export async function resolveSafePath(userPath) {
     );
   }
 
+  let realActiveRoot;
   try {
-    const realActiveRoot = await fs.realpath(activeRoot);
+    realActiveRoot = await fs.realpath(activeRoot);
+  } catch {
+    realActiveRoot = activeRoot;
+  }
+
+  try {
     const stat = await fs.lstat(absoluteTarget);
     const realTarget = await fs.realpath(absoluteTarget);
     const relReal = path.relative(realActiveRoot, realTarget);
@@ -88,7 +141,6 @@ export async function resolveSafePath(userPath) {
     return absoluteTarget;
   } catch (err) {
     if (err.code === 'ENOENT') {
-      const realActiveRoot = await fs.realpath(activeRoot).catch(() => activeRoot);
       await verifyNearestExistingAncestor(absoluteTarget, realActiveRoot);
       return absoluteTarget;
     }

@@ -1,3 +1,4 @@
+// src/api/routes.js
 import { Router } from 'express';
 import { initLlamaEngine } from '../core/engine.js';
 import { getToolsSystemPrompt, sandboxConfig } from '../tools/registry.js';
@@ -8,7 +9,7 @@ import { ExecutionTracer } from '../core/reporter.js';
 import { NeuralSkillRouter } from '../core/neuralRouter.js';
 import { pruneMessages, buildRecentHistoryBlock } from '../core/contextPruner.js';
 import { safeParseJsonPayload, extractActionPlan } from '../core/planParser.js';
-import { formatStepResultForChat, buildNonStreamPrompt, buildCognitivePrompt } from './chatFormatter.js';
+import { formatStepResultForChat, buildNonStreamPrompt, buildCognitivePrompt, formatRoutingHint } from './chatFormatter.js';
 
 const router = Router();
 
@@ -47,7 +48,84 @@ async function applyRouterFeedback(userMessage, actualSkill, tracer, isTestRun) 
   }
 }
 
-async function askModelToFixStep(step, errorMessage, session, tracer) {
+// Короткий текстовый промпт — используется при mode='chat'.
+// Никаких правил JSON, никаких инструментов, никаких конкретных имён файлов.
+function buildTextOnlyPrompt({
+  currentMode,
+  strictDefault,
+  routingDecision,
+  mindSummary,
+  recentHistoryBlock,
+  userMessage
+}) {
+  const routingHint = formatRoutingHint(routingDecision);
+  const modeLine = strictDefault
+    ? 'Строгий режим песочницы (tests/sandbox/).'
+    : 'Свободный режим по всему проекту.';
+
+  const memoryBlock = String(mindSummary || '').trim()
+    ? `\nПАМЯТЬ (контекст, не для копирования):\n${mindSummary}\n`
+    : '';
+
+  return `РЕЖИМ: ${currentMode.toUpperCase()}. ${modeLine}
+
+${routingHint}
+${memoryBlock}${recentHistoryBlock}
+ПРАВИЛО: этот запрос — беседа/информация. Ответь ТОЛЬКО обычным текстом на русском. НЕ возвращай JSON. НЕ создавай файлы. Если для ответа нужен отсутствующий инструмент (дата, погода) — честно скажи: «У меня нет такого инструмента».
+
+ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
+${userMessage}
+
+Твой ответ:`;
+}
+
+// Строгий retry для mode='action', если план не распарсился.
+function buildActionRetryPrompt({ userMessage, originalResponse }) {
+  const preview = String(originalResponse ?? '').slice(0, 800);
+  return `Твой предыдущий ответ НЕ является валидным JSON-массивом шагов:
+---
+${preview}
+---
+
+Повтори ответ СТРОГО в виде JSON-массива. БЕЗ markdown (\`\`\`json), БЕЗ текста до и после.
+Только 7 инструментов: readFile, writeFile, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand.
+Формат: [{"step":1,"tool":"writeFile","arguments":{"filePath":"...","content":"..."},"description":"..."}]
+Имя файла и содержимое бери ДОСЛОВНО из запроса пользователя ниже — не подставляй примеры.
+
+ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
+${userMessage}
+
+Твой ответ (только JSON, без markdown):`;
+}
+
+// Промпт для самокоррекции упавшего шага.
+// ВАЖНО: передаём userMessage — иначе модель «забывает» исходную цель
+// и подставляет типичные примеры (config.json, test.js и т.п.).
+function buildFixPrompt(step, errorMessage, userMessage, prevResults = []) {
+  const completedStepsSummary = Array.isArray(prevResults) && prevResults.length > 0
+    ? `Уже выполненные шаги: ${prevResults.map((r) => `step ${r.step} (${r.tool})`).join(', ')}.`
+    : 'Выполненных шагов пока нет.';
+
+  return `ИСХОДНЫЙ ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
+${userMessage}
+
+ОШИБКА выполнения шага: "${errorMessage}"
+${completedStepsSummary}
+УПАВШИЙ ШАГ: ${JSON.stringify(step)}
+
+ЗАДАЧА: верни СТРОГО один JSON-объект исправленного шага, который решает ИСХОДНЫЙ запрос пользователя.
+- Если исходный запрос просит создать файл X с текстом Y — используй ИМЕННО X и Y из запроса, не выдумывай.
+- Не подставляй "типичные" имена файлов (config.json, test.js, index.js и т.п.), если пользователь их не назвал.
+- Разрешены ТОЛЬКО инструменты: readFile, writeFile, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand.
+- Не повторяй уже выполненные успешные шаги.
+
+Формат ответа (без markdown, без пояснений):
+{ "tool": "writeFile", "arguments": { "filePath": "...", "content": "..." }, "description": "Исправленный шаг" }
+
+Твой ответ:`;
+}
+
+async function askModelToFixStep(step, errorMessage, session, tracer, prevResults, userMessage) {
   tracer.log(
     'routes.js',
     'askModelToFixStep',
@@ -55,11 +133,8 @@ async function askModelToFixStep(step, errorMessage, session, tracer) {
     `Запрос самокоррекции. Ошибка: ${errorMessage}`,
     JSON.stringify(step)
   );
-  const fixPrompt = `Ошибка выполнения шага: "${errorMessage}".
-Исходный шаг: ${JSON.stringify(step)}
-Верни СТРОГО JSON-объект формата без лишнего текста:
-{ "tool": "writeFile", "arguments": { "filePath": "...", "content": "..." } }
-Твой ответ:`;
+
+  const fixPrompt = buildFixPrompt(step, errorMessage, userMessage, prevResults);
 
   await gpuMutex.acquire();
   try {
@@ -115,15 +190,19 @@ router.post('/v1/chat/completions', async (req, res) => {
       'routes.js',
       'POST /v1/chat/completions',
       'INFO',
-      `stream=${stream}, mode=${currentMode}, reset=${modeChanged}, prunedCount=${prunedMessages.length}`
+      `stream=${stream}, mode=${currentMode}, reset=${modeChanged}, prunedCount=${prunedMessages.length}`,
+      JSON.stringify(prunedMessages, null, 2)
     );
 
     const routingDecision = neuralRouter.predict(userMessage);
+    const expectedMode = routingDecision.mode || 'unknown';
+    tracer.setRoutingInfo(routingDecision);
     tracer.log(
       'routes.js',
       'NeuralRouter',
       'INFO',
-      `Мозжечок определил скил: ${routingDecision.selectedSkill} (уверенность: ${(routingDecision.confidence * 100).toFixed(1)}%)`
+      `Мозжечок определил скил: ${routingDecision.selectedSkill} (уверенность: ${(routingDecision.confidence * 100).toFixed(1)}%), mode=${expectedMode}`,
+      JSON.stringify(routingDecision, null, 2)
     );
 
     await initMind();
@@ -141,22 +220,35 @@ router.post('/v1/chat/completions', async (req, res) => {
       mode: currentMode
     });
 
+    // ============================================================
+    // НЕСТРИМОВЫЙ РЕЖИМ
+    // ============================================================
     if (!stream) {
-      const prompt = buildNonStreamPrompt({
-        currentMode,
-        strictDefault: sandboxConfig.strictDefault,
-        toolsPrompt,
-        routingDecision,
-        mindSummary,
-        recentHistoryBlock,
-        userMessage
-      });
+      const prompt = expectedMode === 'chat'
+        ? buildTextOnlyPrompt({
+            currentMode,
+            strictDefault: sandboxConfig.strictDefault,
+            routingDecision,
+            mindSummary,
+            recentHistoryBlock,
+            userMessage
+          })
+        : buildNonStreamPrompt({
+            currentMode,
+            strictDefault: sandboxConfig.strictDefault,
+            toolsPrompt,
+            routingDecision,
+            mindSummary,
+            recentHistoryBlock,
+            userMessage
+          });
+      tracer.setPromptSent(prompt);
 
       const responseText = await session.prompt(prompt);
       releaseGpuOnce();
       const cleanResp = responseText.trim();
       tracer.setFinalResponse(cleanResp);
-      tracer.log('routes.js', 'session.prompt (non-stream)', 'OK', 'Ответ сформирован');
+      tracer.log('routes.js', 'session.prompt (non-stream)', 'OK', `Ответ сформирован (mode=${expectedMode})`);
       await tracer.commitAndSavePdf();
 
       return res.json({
@@ -174,6 +266,9 @@ router.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
+    // ============================================================
+    // СТРИМОВЫЙ РЕЖИМ
+    // ============================================================
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -186,6 +281,48 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     sendSSE({ choices: [{ delta: { role: 'assistant', content: `${modeBadge} Думаю...\n` } }] });
 
+    // ---------- ВЕТКА 1: ЧИСТЫЙ ДИАЛОГ ----------
+    if (expectedMode === 'chat') {
+      const textPrompt = buildTextOnlyPrompt({
+        currentMode,
+        strictDefault: sandboxConfig.strictDefault,
+        routingDecision,
+        mindSummary,
+        recentHistoryBlock,
+        userMessage
+      });
+      tracer.setPromptSent(textPrompt);
+
+      const rawText = await session.prompt(textPrompt);
+      releaseGpuOnce();
+      tracer.setModelPlan(rawText);
+      tracer.log('routes.js', 'session.prompt (stream, chat-mode)', 'OK', 'Получен текстовый ответ');
+
+      const cleanText = rawText.trim();
+
+      // Даже если модель ошибочно вернула JSON — не исполняем, отдаём как текст.
+      const planLookalike = extractActionPlan(rawText);
+      if (planLookalike.length > 0) {
+        tracer.log(
+          'routes.js',
+          'ChatModePlanIgnored',
+          'WARN',
+          `На chat-запрос модель вернула план из ${planLookalike.length} шагов — план проигнорирован, отдан как текст.`
+        );
+      }
+
+      await pushRecursiveThought(`Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`, 1, false);
+      await applyRouterFeedback(userMessage, 'chat', tracer, isTestRun);
+
+      sendSSE({ choices: [{ delta: { content: `\n${cleanText}\n` } }] });
+      tracer.setFinalResponse(chatTranscript.trim());
+      tracer.log('routes.js', 'TextResponse', 'OK', 'Текстовый ответ отправлен в чат');
+      await tracer.commitAndSavePdf();
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
+    // ---------- ВЕТКА 2: ДЕЙСТВИЕ / MIXED / UNKNOWN ----------
     const cognitivePrompt = buildCognitivePrompt({
       currentMode,
       strictDefault: sandboxConfig.strictDefault,
@@ -195,29 +332,54 @@ router.post('/v1/chat/completions', async (req, res) => {
       recentHistoryBlock,
       userMessage
     });
+    tracer.setPromptSent(cognitivePrompt);
 
-    const modelResponse = await session.prompt(cognitivePrompt);
+    let modelResponse = await session.prompt(cognitivePrompt);
     releaseGpuOnce();
     tracer.setModelPlan(modelResponse);
-    tracer.log('routes.js', 'session.prompt (stream)', 'OK', 'Получен ответ от модели');
+    tracer.log('routes.js', 'session.prompt (stream)', 'OK', `Получен ответ от модели (mode=${expectedMode})`);
 
-    const plan = extractActionPlan(modelResponse);
+    let plan = extractActionPlan(modelResponse);
+
+    // Если это был action-запрос, но модель не вернула план — один retry со строгим требованием JSON.
+    if (plan.length === 0 && expectedMode === 'action') {
+      tracer.log('routes.js', 'ActionRetry', 'RETRY', 'План не распознан, запрашиваем повтор в строгом формате');
+      const retryPrompt = buildActionRetryPrompt({ userMessage, originalResponse: modelResponse });
+      const retryResponse = await session.prompt(retryPrompt);
+      const retryPlan = extractActionPlan(retryResponse);
+      if (retryPlan.length > 0) {
+        modelResponse = retryResponse;
+        plan = retryPlan;
+        tracer.setModelPlan(modelResponse);
+        tracer.log('routes.js', 'ActionRetry', 'OK', `Retry успешен: план из ${plan.length} шагов`);
+      } else {
+        tracer.log('routes.js', 'ActionRetry', 'ERROR', 'Retry не дал валидного плана');
+      }
+    }
+
     const isJsonPlan = plan.length > 0;
 
     if (!isJsonPlan) {
       const cleanText = modelResponse.trim();
-      await applyRouterFeedback(userMessage, 'chat', tracer, isTestRun);
+
+      // Не портим веса роутера, если action провалился в текст
+      if (expectedMode !== 'action') {
+        await applyRouterFeedback(userMessage, 'chat', tracer, isTestRun);
+      } else {
+        tracer.log('routes.js', 'FeedbackSkipped', 'WARN', 'Action-запрос провалился в текст — роутер не дообучаем');
+      }
+
       await pushRecursiveThought(`Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`, 1, false);
       sendSSE({ choices: [{ delta: { content: `\n${cleanText}\n` } }] });
       tracer.setFinalResponse(chatTranscript.trim());
-      tracer.log('routes.js', 'TextResponse', 'OK', 'Текстовый ответ отправлен в чат');
+      tracer.log('routes.js', 'TextResponse', 'OK', 'Текстовый ответ отправлен в чат (fallback)');
       await tracer.commitAndSavePdf();
       res.write('data: [DONE]\n\n');
       return res.end();
     }
 
     await pushRecursiveThought(`Запрос: ${userMessage} -> План из ${plan.length} шагов`, 1, false);
-    tracer.log('routes.js', 'PlanParser', 'OK', `План из ${plan.length} шагов`, JSON.stringify(plan));
+    tracer.log('routes.js', 'PlanParser', 'OK', `План из ${plan.length} шагов`, JSON.stringify(plan, null, 2));
     sendSSE({ choices: [{ delta: { content: `\nПлан принят (${plan.length} шагов). Выполняем...\n\n` } }] });
 
     let currentStepMeta = null;
@@ -234,19 +396,31 @@ router.post('/v1/chat/completions', async (req, res) => {
           argsObj.commandId ||
           argsObj.command ||
           'не указан';
-        currentStepMeta = { step: event.step, tool: event.tool || stepObj.tool, target };
-        tracer.log('executor.js', `Шаг ${event.step} (${currentStepMeta.tool})`, 'INFO', `${event.description} [Путь: ${target}]`);
+        currentStepMeta = {
+          step: event.step,
+          tool: event.tool || stepObj.tool,
+          target,
+          args: argsObj
+        };
+        tracer.log(
+          'executor.js',
+          `Шаг ${event.step} (${currentStepMeta.tool})`,
+          'INFO',
+          `${event.description} [Путь: ${target}]`,
+          JSON.stringify(argsObj, null, 2)
+        );
         sendSSE({ choices: [{ delta: { content: `▶ Шаг ${event.step}: ${event.description} [\`${currentStepMeta.tool}\`]\n` } }] });
       } else if (event.type === 'step_result') {
         const target = currentStepMeta?.target || 'не указан';
         const toolName = event.tool || currentStepMeta?.tool;
+        const argsObj = currentStepMeta?.args || null;
         if (event.success) {
-          tracer.addAction(event.step, toolName, target, 'OK', event.result || 'Выполнено');
+          tracer.addAction(event.step, toolName, target, 'OK', event.result || 'Выполнено', argsObj);
           tracer.log('executor.js', `Шаг ${event.step}`, 'OK', event.result || 'Успешно');
           const formatted = formatStepResultForChat(toolName, event.result);
           sendSSE({ choices: [{ delta: { content: formatted } }] });
         } else {
-          tracer.addAction(event.step, toolName, target, 'ERROR', event.error);
+          tracer.addAction(event.step, toolName, target, 'ERROR', event.error, argsObj);
           tracer.log('executor.js', `Шаг ${event.step}`, 'ERROR', event.error);
           sendSSE({ choices: [{ delta: { content: `❌ Ошибка: ${event.error}\n` } }] });
         }
@@ -257,7 +431,8 @@ router.post('/v1/chat/completions', async (req, res) => {
       plan,
       progressCallback,
       session,
-      (step, err, sess, prevResults) => askModelToFixStep(step, err, sess, tracer, prevResults),
+      // ВАЖНО: userMessage пробрасывается в askModelToFixStep через замыкание
+      (step, err, sess, prevResults) => askModelToFixStep(step, err, sess, tracer, prevResults, userMessage),
       true
     );
 

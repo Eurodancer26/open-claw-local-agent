@@ -1,4 +1,12 @@
+// src/api/chatFormatter.js
 export const MAX_CHAT_CODE_CHARS = 4000;
+
+const FORBIDDEN_TOOL_NAMES = [
+  'chat', 'strictMode', 'date', 'time', 'getDate', 'getTime',
+  'format', 'formatCode', 'prettier', 'lint', 'deploy', 'hash',
+  'generateCode', 'bundle', 'rollup', 'webpack', 'publish',
+  'fetch', 'http', 'curl', 'browser', 'search', 'webSearch'
+];
 
 function parseStepResultData(rawResult) {
   if (!rawResult) return null;
@@ -30,6 +38,41 @@ export function formatStepResultForChat(toolName, rawResult) {
       : text;
 
     return `✔ Успешно. Содержимое файла:\n\`\`\`\n${clipped}\n\`\`\`\n`;
+  }
+
+  if (toolName === 'writeFile') {
+    const filePath = data?.filePath || data?.path || data?.target;
+    const bytes = Number.isFinite(data?.bytesWritten) ? ` (${data.bytesWritten} Б)` : '';
+    if (filePath) {
+      return `✔ Успешно. Файл записан: ${filePath}${bytes}\n`;
+    }
+    return '✔ Успешно. Файл записан.\n';
+  }
+
+  if (toolName === 'deleteFile') {
+    const filePath = data?.filePath || data?.path || data?.target;
+    return filePath
+      ? `✔ Успешно. Файл удалён: ${filePath}\n`
+      : '✔ Успешно. Файл удалён.\n';
+  }
+
+  if (toolName === 'generateUnitTest') {
+    const outputPath = data?.outputPath || data?.path || data?.testPath;
+    const sourcePath = data?.sourcePath || data?.source;
+    if (outputPath) {
+      return `✔ Успешно. Тест создан: ${outputPath}${sourcePath ? ` (по ${sourcePath})` : ''}\n`;
+    }
+    return '✔ Успешно. Unit-тест сгенерирован.\n';
+  }
+
+  if (toolName === 'runCommand') {
+    const stdout = typeof data?.stdout === 'string' ? data.stdout.trim() : '';
+    const exitCode = data?.exitCode ?? data?.code ?? 0;
+    const header = `✔ Успешно (exit=${exitCode}).`;
+    if (stdout) {
+      return `${header}\n\`\`\`\n${stdout}\n\`\`\`\n`;
+    }
+    return `${header}\n`;
   }
 
   if (toolName === 'analyzeProject') {
@@ -103,15 +146,53 @@ export function formatRoutingHint(routingDecision) {
         .join(', ')
     : null;
 
+  const mode = routingDecision.mode;
+
+  let directHint = '';
+  if (mode === 'chat') {
+    directHint = ' → РЕЖИМ: беседа. Отвечай ТОЛЬКО текстом, без JSON.';
+  } else if (mode === 'action') {
+    directHint = ' → РЕЖИМ: действие. Отвечай ТОЛЬКО JSON-массивом.';
+  } else if (mode === 'mixed') {
+    directHint = ' → РЕЖИМ: составной. Выбери: либо текст, либо JSON. Не смешивай.';
+  }
+
   if (routingDecision.isBroadOrMixed) {
     return topSummary
-      ? `Широкий или составной запрос (ведущий вектор: ${skill} — ${confidencePct}%; распределение: ${topSummary}). Опирайся на весь текст промта целиком.`
-      : `Широкий или составной запрос (ведущий вектор: ${skill} — ${confidencePct}%). Опирайся на весь текст промта целиком.`;
+      ? `Широкий/составной (лидер: ${skill} — ${confidencePct}%; ${topSummary}).${directHint}`
+      : `Широкий/составной (лидер: ${skill} — ${confidencePct}%).${directHint}`;
   }
 
   return topSummary
-    ? `Выбранный скил: ${skill} (${confidencePct}%; распределение: ${topSummary}).`
-    : `Выбранный скил: ${skill} (${confidencePct}%).`;
+    ? `Скил: ${skill} (${confidencePct}%; ${topSummary}).${directHint}`
+    : `Скил: ${skill} (${confidencePct}%).${directHint}`;
+}
+
+const FORBIDDEN_TOOLS_LIST = FORBIDDEN_TOOL_NAMES.map((n) => `«${n}»`).join(', ');
+
+// Сокращённый набор правил. Специально убраны ВСЕ конкретные имена файлов,
+// чтобы модель не могла их скопировать (few-shot contamination).
+const COGNITIVE_RULES = `ПРАВИЛА (СТРОГО):
+1. Беседа / вопросы / приветствия → ответ ТОЛЬКО текстом на русском. Задачи с файлами → ответ ТОЛЬКО JSON-массивом. Не смешивай.
+2. Формат плана: [{"step":1,"tool":"writeFile","arguments":{"filePath":"...","content":"..."},"description":"..."}]. БЕЗ markdown, БЕЗ \`\`\`json, БЕЗ текста до и после JSON.
+3. Только 7 инструментов: readFile, writeFile, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand. Инструментов ${FORBIDDEN_TOOLS_LIST} и любых других НЕ СУЩЕСТВУЕТ.
+4. Если инструмента нет (дата, погода, курс) → ответ ТОЛЬКО текстом: «У меня нет такого инструмента».
+5. Относительные пути автоматически привязываются к tests/sandbox/. Префикс "tests/sandbox/" в planе писать НЕ нужно.
+6. Запрос вне tests/sandbox/ («в корне», «../», абсолютный) → откажись текстом и предложи путь внутри песочницы.
+7. Подстановка результата шага N: строка "{{stepN.output}}". Никакого JS-кода и конкатенации.
+8. ГЛАВНОЕ: имя файла и содержимое бери ДОСЛОВНО из ТЕКУЩЕГО запроса пользователя. НЕ копируй из примеров, памяти, предыдущих ответов. Если пользователь просит файл X с текстом Y — используй именно X и Y. Не подставляй «типичные» примеры.
+
+ФОРМАТ (значения подставляй из запроса, не копируй буквально):
+• «Привет! Кто ты?» → текст: «Привет! Я автономный ИИ-агент Конструкт АИ.»
+• «Какая сегодня дата?» → текст: «У меня нет инструмента для получения текущей даты.»
+• «Создай файл FILE_A с текстом TEXT_X» → [{"step":1,"tool":"writeFile","arguments":{"filePath":"FILE_A","content":"TEXT_X"},"description":"Создать файл"}]`;
+
+function renderMemoryBlock(mindSummary) {
+  const text = String(mindSummary || '').trim();
+  if (!text || /^История размышлений пуста\.?$/i.test(text)) {
+    return '';
+  }
+  return `\nПАМЯТЬ (только для понимания контекста, НЕ для копирования значений):\n${text}\n`;
 }
 
 export function buildNonStreamPrompt({
@@ -125,7 +206,18 @@ export function buildNonStreamPrompt({
 }) {
   const routingHint = formatRoutingHint(routingDecision);
 
-  return `ТЕКУЩИЙ РЕЖИМ РАБОТЫ: ${currentMode.toUpperCase()} (${strictDefault ? 'Строго внутри tests/sandbox/' : 'Свободный доступ по всему проекту'}).\n\n${toolsPrompt}\n\nАНАЛИЗ НЕЙРО-МОЗЖЕЧКА: ${routingHint}\n\n${mindSummary}${recentHistoryBlock}\nЗапрос: ${userMessage}`;
+  return `РЕЖИМ: ${currentMode.toUpperCase()} (${strictDefault ? 'песочница tests/sandbox/' : 'свободный'}).
+
+${toolsPrompt}
+
+${routingHint}
+${renderMemoryBlock(mindSummary)}${recentHistoryBlock}
+${COGNITIVE_RULES}
+
+ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
+${userMessage}
+
+Твой ответ:`;
 }
 
 export function buildCognitivePrompt({
@@ -139,20 +231,16 @@ export function buildCognitivePrompt({
 }) {
   const routingHint = formatRoutingHint(routingDecision);
 
-  return `ТЕКУЩИЙ АКТИВНЫЙ РЕЖИМ СИСТЕМЫ: ${currentMode.toUpperCase()}
-${strictDefault ? '-> ВНИМАНИЕ: Включен строгий режим песочницы (tests/sandbox/).' : '-> ВНИМАНИЕ: Включен СВОБОДНЫЙ режим работы по всему проекту.'}
+  return `РЕЖИМ: ${currentMode.toUpperCase()} (${strictDefault ? 'песочница tests/sandbox/' : 'свободный'}).
+
 ${toolsPrompt}
-АНАЛИЗ НЕЙРО-МОЗЖЕЧКА: ${routingHint}
-ОПЫТ ПРОШЛЫХ ОШИБОК:
-${mindSummary}${recentHistoryBlock}
-Запрос пользователя: ${userMessage}
-ПРАВИЛА ОТВЕТА:
-1. Если это обычный вопрос, отказ из-за ограничений песочницы или уточнение папки в свободном режиме отвечай ТОЛЬКО чистым текстом на русском языке без JSON.
-2. Если в свободном режиме пользователь не указал путь (например, "создай файл data.txt"), ты ОБЯЗАН задать вопрос текстом: "В какой именно папке создать файл?" и НЕ вызывать инструменты.
-3. Если требуется выполнить действие инструментом и все условия режима соблюдены, верни СТРОГО валидный JSON-план с обязательным объектом "arguments":
-[
-  { "step": 1, "tool": "writeFile", "arguments": { "filePath": "путь/к/файлу", "content": "содержимое" }, "description": "Создание файла" }
-]
-4. В поле "description" пиши ТОЛЬКО простой текст без кавычек и фигурных скобок!
+
+${routingHint}
+${renderMemoryBlock(mindSummary)}${recentHistoryBlock}
+${COGNITIVE_RULES}
+
+ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
+${userMessage}
+
 Твой ответ:`;
 }

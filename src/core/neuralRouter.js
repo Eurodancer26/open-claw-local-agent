@@ -1,3 +1,4 @@
+// src/core/neuralRouter.js
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -5,6 +6,10 @@ import path from 'node:path';
  * Гибкий рекурсивный нейро-роутер на чистом JavaScript для CPU.
  * Ориентирован на длинные многословные промты, составные задачи,
  * смену контекста в диалоге и сохранение скрытого состояния.
+ *
+ * Возвращает mode: 'chat' | 'action' | 'mixed' | 'unknown' — готовый
+ * сигнал для routes.js, чтобы на информационные вопросы не генерировался
+ * JSON-план.
  */
 export class NeuralSkillRouter {
   constructor(weightsPath = 'models/neural_router_weights.json') {
@@ -60,7 +65,7 @@ export class NeuralSkillRouter {
         /(?:^|[^\p{L}\p{N}_-])(?:верси[яиюе]|node(?:js)?|npm|npx|yarn|pnpm|git(?:\s+(?:status|diff|log|branch|commit|pull|push))?|запуст[иь]|выполн[иь]|команд[ауые]?|терминал[ауе]?|консол[ьию]|скрипт[ауые]?|прогон[ауе]?|сборк[ауие]|билд|процесс[ауые]?|pm2|nginx|docker)(?=$|[^\p{L}\p{N}_-])/giu,
 
       chatQuestion:
-        /(?:привет|здравствуй|добрый\s+(?:день|вечер|утро)|кто\s+ты|что\s+(?:ты\s+)?умеешь|как\s+дела|в\s+каком\s+режим[еу]|почему|зачем|как\s+(?:работает|устроен|лучше)|расскаж[иь]|объясн[иь]|поясн[иь]|сравни|в\s+чём\s+разниц[аа]|какая\s+(?:сегодня\s+)?дат[ау]|\?)/giu,
+        /(?:привет|здравствуй|добрый\s+(?:день|вечер|утро)|кто\s+ты|что\s+(?:ты\s+)?умеешь|как\s+дела|как\s+жизнь|что\s+нового|в\s+каком\s+режим[еу]|почему|зачем|как\s+(?:работает|устроен|лучше)|расскаж[иь]|объясн[иь]|поясн[иь]|сравни|в\s+чём\s+разниц[аа]|какая\s+(?:сегодня\s+)?дат[ау]|который\s+час|сколько\s+времени|текущ[а-я]+\s+(?:дат|врем)[а-я]*|как\s+тебя\s+зовут|тво[её]\s+имя|кто\s+вы|что\s+такое|можешь\s+ли|умеешь\s+ли|\?)/giu,
 
       fileAction:
         /(?:^|[^\p{L}\p{N}_-])(?:созда[йть]|запиш[иь]|прочита[йть]|счита[йть]|удал[иь]|сохран[иь]|измен[иь]|обнов[иь]|откро[йть]|вывед[иь]|перенес[иь]|скопиру[йть]|файл[ауые]?|файлик[ауе]?|папк[ауеио]?|директор[ияиюе]|каталог[ауе]?|модул[ьяюе]|компонент[ауые]?|заготовк[ауие]|шаблон[ауые]?)(?=$|[^\p{L}\p{N}_-])/giu,
@@ -74,6 +79,10 @@ export class NeuralSkillRouter {
       analysisOrTest:
         /(?:^|[^\p{L}\p{N}_-])(?:анализ[ауе]?|проанализиру[йть]|статистик[ауые]|структур[ауые]|обзор[ауе]?|аудит[ауе]?|сгенериру[йть]|напиш[иь]\s+тест|(?:unit|юнит)[-_\s]?тест[ауые]?|тестирован[ияию]|провер[ьяи]|проверк[ауие]|рефакторинг[ауе]?|разбе[йть]|оптимизиру[йть]|диагностик[ауие])(?=$|[^\p{L}\p{N}_-])/giu
     };
+
+    // Приветствия — всегда чат с максимальной уверенностью
+    this.greetingRegex =
+      /^(привет|здравствуй|здорово|хай|hello|hi|ку|доброе\s+утро|добрый\s+(?:день|вечер)|доброго\s+(?:дня|вечера))\b/iu;
   }
 
   /**
@@ -99,10 +108,6 @@ export class NeuralSkillRouter {
     return `${raw.slice(0, 320)} ${raw.slice(-280)}`;
   }
 
-  /**
-   * Вычисляет плавный весовой сигнал [0..1] с учётом количества совпадений
-   * и длины текста, чтобы длинные описания не размывали важный сигнал.
-   */
   computeSignal(text, regex, { baseWeight = 0.5, stepWeight = 0.25, maxValue = 1.0, lengthNorm = 0 } = {}) {
     if (!text) return 0;
     const matches = text.match(regex);
@@ -119,9 +124,6 @@ export class NeuralSkillRouter {
     return Number(Math.min(maxValue, rawScore * lengthFactor).toFixed(3));
   }
 
-  /**
-   * Преобразует текст пользователя в вектор из 7 вещественных признаков [0..1].
-   */
   extractFeatures(text) {
     const fullText = String(text || '').trim();
     if (!fullText) {
@@ -216,12 +218,40 @@ export class NeuralSkillRouter {
     return exps.map((v) => Number((v / sumExps).toFixed(4)));
   }
 
+  rebalanceScores(probs, forcedIndex, minValue) {
+    if (probs[forcedIndex] >= minValue) return [...probs];
+
+    const othersSum = probs.reduce((s, p, i) => (i === forcedIndex ? s : s + p), 0);
+    const remaining = 1 - minValue;
+    const factor = othersSum > 0 ? remaining / othersSum : 0;
+
+    const out = probs.map((p, i) => (i === forcedIndex ? minValue : p * factor));
+    const sum = out.reduce((a, b) => a + b, 0);
+    return out.map((p) => Number((p / sum).toFixed(4)));
+  }
+
   predict(userText) {
     const rawText = String(userText || '').trim();
+
+    if (!rawText) {
+      return {
+        selectedSkill: 'chat',
+        confidence: 1,
+        isBroadOrMixed: false,
+        topSkills: [
+          { skill: 'chat', score: 1 },
+          { skill: 'file_ops', score: 0 },
+          { skill: 'system_cmd', score: 0 }
+        ],
+        scores: { chat: 1, file_ops: 0, system_cmd: 0 },
+        features: new Array(this.inputSize).fill(0),
+        memorySnapshot: this.hiddenState.map((n) => Number(n.toFixed(3))),
+        mode: 'chat'
+      };
+    }
+
     const input = this.extractFeatures(rawText);
 
-    // При явной смене темы (чёткая системная команда или чистый диалог без файлов/путей)
-    // ослабляем старую рекурсивную инерцию, чтобы прошлый шаг не перетягивал ответ
     const clearTopicShift =
       input[3] >= 0.7 ||
       (input[0] >= 0.65 && input[1] === 0 && input[2] === 0);
@@ -233,15 +263,12 @@ export class NeuralSkillRouter {
 
     for (let i = 0; i < this.hiddenSize; i++) {
       let sum = this.Bh[i];
-
       for (let j = 0; j < this.inputSize; j++) {
         sum += this.Wxh[i][j] * input[j];
       }
-
       for (let j = 0; j < this.hiddenSize; j++) {
         sum += this.Whh[i][j] * prevHidden[j];
       }
-
       nextHidden[i] = Math.tanh(sum);
     }
 
@@ -256,7 +283,65 @@ export class NeuralSkillRouter {
       logits[k] = sum;
     }
 
-    const probabilities = this.softmax(logits);
+    let probabilities = this.softmax(logits);
+
+    // ============================================================
+    // ПОСТ-ОБРАБОТКА: гарантии для однозначных запросов
+    // ============================================================
+
+    const isGreeting = this.greetingRegex.test(rawText);
+
+    const isPureInfo =
+      input[0] >= 0.55 &&
+      input[1] < 0.15 &&
+      input[2] < 0.15 &&
+      input[3] < 0.15 &&
+      input[6] < 0.15;
+
+    // Чистый короткий чат: активен только isShortReply, никаких
+    // action-сигналов. Пример: «Напиши одно слово: тест».
+    const isShortChatOnly =
+      input[4] >= 0.5 &&
+      input[1] < 0.15 &&
+      input[2] < 0.15 &&
+      input[3] < 0.15 &&
+      input[6] < 0.15;
+
+    const isClearFileAction =
+      input[1] >= 0.6 &&
+      input[2] >= 0.5 &&
+      input[3] < 0.4;
+
+    const isClearSystemCmd = input[3] >= 0.7;
+
+    // Счётчик активных смысловых направлений
+    const activeSignalsCount = [
+      input[0] >= 0.5,
+      input[1] >= 0.45 || input[2] >= 0.6 || input[6] >= 0.5,
+      input[3] >= 0.5
+    ].filter(Boolean).length;
+
+    // Chat лидирует и нет вообще никаких конкурирующих action-сигналов —
+    // значит это заведомо беседа, даже если уверенность ниже 0.56.
+    const chatHasNoCompetition =
+      input[0] >= 0.3 || // какой-то чат-сигнал всё-таки есть (или короткая реплика)
+      input[4] >= 0.5;
+    const noActionSignalsAtAll =
+      input[1] < 0.3 &&
+      input[2] < 0.3 &&
+      input[3] < 0.3 &&
+      input[6] < 0.3;
+    const isWeakChatOnly = chatHasNoCompetition && noActionSignalsAtAll;
+
+    if (isGreeting) {
+      probabilities = this.rebalanceScores(probabilities, 0, 0.98);
+    } else if (isPureInfo || isShortChatOnly || isWeakChatOnly) {
+      probabilities = this.rebalanceScores(probabilities, 0, 0.92);
+    } else if (isClearFileAction) {
+      probabilities = this.rebalanceScores(probabilities, 1, 0.88);
+    } else if (isClearSystemCmd) {
+      probabilities = this.rebalanceScores(probabilities, 2, 0.88);
+    }
 
     const ranked = this.skills
       .map((skill, idx) => ({ skill, score: probabilities[idx] }))
@@ -265,17 +350,41 @@ export class NeuralSkillRouter {
     const best = ranked[0];
     const second = ranked[1] || { score: 0 };
 
-    const activeSignalsCount = [
-      input[0] >= 0.5,
-      input[1] >= 0.45 || input[2] >= 0.6 || input[6] >= 0.5,
-      input[3] >= 0.5
-    ].filter(Boolean).length;
-
     const isLongPrompt = rawText.length > 220;
+
+    // isBroadOrMixed подавляется, если:
+    //  1) это приветствие / чистый инфовопрос / короткий чат;
+    //  2) либо явное file/system-действие с ОДНИМ активным сигналом;
+    //  3) либо weak chat (никаких action-сигналов вообще).
+    const suppressMixed =
+      isGreeting ||
+      isPureInfo ||
+      isShortChatOnly ||
+      isWeakChatOnly ||
+      (isClearFileAction && activeSignalsCount === 1) ||
+      (isClearSystemCmd && activeSignalsCount === 1);
+
     const isBroadOrMixed =
-      activeSignalsCount > 1 ||
-      best.score < 0.56 ||
-      (isLongPrompt && best.score - second.score < 0.22);
+      !suppressMixed &&
+      (activeSignalsCount > 1 ||
+        best.score < 0.56 ||
+        (isLongPrompt && best.score - second.score < 0.22));
+
+    // Итоговый режим — прямой сигнал для routes.js
+    let mode;
+    if (isGreeting || isPureInfo || isShortChatOnly || isWeakChatOnly) {
+      mode = 'chat';
+    } else if (isClearFileAction && best.skill === 'file_ops') {
+      mode = 'action';
+    } else if (isClearSystemCmd && activeSignalsCount === 1) {
+      mode = 'action';
+    } else if (isBroadOrMixed) {
+      mode = 'mixed';
+    } else if (best.score >= 0.6) {
+      mode = best.skill === 'chat' ? 'chat' : 'action';
+    } else {
+      mode = 'unknown';
+    }
 
     return {
       selectedSkill: best.skill,
@@ -288,7 +397,8 @@ export class NeuralSkillRouter {
         system_cmd: probabilities[2]
       },
       features: input,
-      memorySnapshot: this.hiddenState.map((n) => Number(n.toFixed(3)))
+      memorySnapshot: this.hiddenState.map((n) => Number(n.toFixed(3))),
+      mode
     };
   }
 
@@ -312,10 +422,6 @@ export class NeuralSkillRouter {
     return this.predict(userText);
   }
 
-  /**
-   * Мягкое онлайн-дообучение по фактическому результату выполнения запроса.
-   * Не искажает диалоговую память (hiddenState) текущего разговора.
-   */
   reinforceOutcome(userText, actualSkill, learningRate = 0.035) {
     const targetIndex = this.skills.indexOf(actualSkill);
     if (targetIndex === -1 || !userText || typeof userText !== 'string') {
