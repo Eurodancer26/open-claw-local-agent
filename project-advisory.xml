@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project_advisory repository="Eurodancer26/open-claw-local-agent" revision="6234e00d898abc5992e2193f7047cb5b8566702a" generated_at="2026-11-23">
+  <scope>
+    <method>Статический анализ GitHub-кода и структуры репозитория.</method>
+    <tests_executed>false</tests_executed>
+    <hardware_benchmarks_executed>false</hardware_benchmarks_executed>
+    <note>Рекомендации и аппаратные настройки требуют проверки на целевой ОС, драйвере, версии node-llama-cpp и конкретной Intel Arc GPU.</note>
+  </scope>
+
+  <assessment>
+    <summary>Проект — перспективный локальный агентский прототип: Express API, локальная GGUF-модель, планирование действий, инструменты, SSE-интерфейс, контекстная обработка и XML-трассировка.</summary>
+    <readiness>До production readiness ещё нужны усиление границ безопасности, детерминированные тесты, единый цикл исполнения для JSON/SSE и отделение модели от провайдера.</readiness>
+    <principle>Сначала сделать поведение безопасным и измеримым; затем добавлять возможности.</principle>
+  </assessment>
+
+  <current_structure>
+    <path>public/</path><role>Веб-интерфейс, клиентский JavaScript и CSS.</role>
+    <path>scripts/full-dump.mjs</path><role>Скрипт формирования XML-дампа проекта и локальных отчётов.</role>
+    <path>src/api/</path><role>Маршруты HTTP, форматирование prompt и API.</role>
+    <path>src/config/</path><role>Путь модели и параметры приложения.</role>
+    <path>src/core/</path><role>LLM engine, executor, parser, mutex, контекст, роутер, память и reporter.</role>
+    <path>src/tools/</path><role>Реестр инструментов, безопасные команды, сканирование и проверка путей.</role>
+    <path>tests/</path><role>Unit, интеграционные, LLM и ручные benchmark-сценарии.</role>
+  </current_structure>
+
+  <critical_findings>
+    <finding id="F1" severity="critical" file="src/api/routes.js">
+      <title>Возможная взаимная блокировка при самокоррекции</title>
+      <detail>Маршрут захватывает gpuMutex на длительность запроса, а путь исправления может повторно захватывать тот же mutex для дополнительного session.prompt(). Нерекурсивный mutex не допускает повторного захвата владельцем.</detail>
+      <action>Не блокировать весь HTTP-запрос. Защищать mutex-ом каждый отдельный вызов модели, включая планирование, retry и self-correction. Не допускать вложенного захвата.</action>
+      <test>Принудительно вызвать ошибку инструмента и проверить, что prompt исправления завершается без deadlock.</test>
+    </finding>
+    <finding id="F2" severity="high" file="src/api/routes.js">
+      <title>Режимы JSON и SSE выполняют разную логику</title>
+      <detail>В stream=false маршрут генерирует обычный ответ, тогда как планирование/исполнение инструментов находится в streaming-пути.</detail>
+      <action>Вынести общий цикл агента в src/agent/runAgent.js. Пусть он выдаёт события; JSON собирает итог, SSE передаёт события клиенту.</action>
+      <test>Один action-запрос в обоих режимах должен создать одинаковый результат.</test>
+    </finding>
+    <finding id="F3" severity="high" files="src/api/routes.js;src/tools/pathSecurity.js;src/tools/safeCommands.js">
+      <title>Режим sandbox хранится глобально и не ограничивает системные команды</title>
+      <detail>Переключение strictSandbox изменяет глобальную конфигурацию процесса. runSafeCommand использует cwd рабочего каталога, поэтому строгий файловый режим сам по себе не изолирует команды.</detail>
+      <action>Передавать режим в контексте каждого запуска tools; не менять глобальное состояние. В строгом режиме отключить команды, работающие с корнем проекта. Для выполнения пользовательского кода использовать изолированный процесс/контейнер с явными ограничениями.</action>
+      <test>Параллельные запросы с разными режимами не должны влиять друг на друга; strict mode не должен читать/изменять файлы вне sandbox.</test>
+    </finding>
+    <finding id="F4" severity="high" files="src/core/engine.js;src/api/routes.js">
+      <title>Привязка приложения к одному LLM backend и гонка инициализации</title>
+      <detail>API напрямую использует Llama engine, а инициализация singleton не гарантирует, что параллельные первые запросы разделят один Promise загрузки модели.</detail>
+      <action>Ввести ModelProvider с initialize(), generate(), stream(), close(); перенести llama.cpp в адаптер. Кэшировать Promise инициализации и очищать его при ошибке.</action>
+      <test>Параллельный запуск инициализации вызывает загрузчик модели ровно один раз.</test>
+    </finding>
+    <finding id="F5" severity="high" files="src/api/routes.js;public/app.js">
+      <title>Обработка ошибок SSE неполная</title>
+      <detail>Клиент извлекает только choices[0].delta.content; структурированное событие error может быть проигнорировано. Следует согласовать формат и завершение потока.</detail>
+      <action>Определить схему SSE-событий, обработать error и [DONE], аккумулировать произвольно разделённые чанки и гарантировать завершение.</action>
+      <test>Проверить ошибку до начала потока, ошибку после начала потока, разбиение события по чанкам и единственный маркер завершения.</test>
+    </finding>
+    <finding id="F6" severity="high" files="src/core/planParser.js;src/core/executor.js;src/tools/registry.js">
+      <title>Контракт плана и аргументов инструмента требует единой валидации</title>
+      <detail>План нормализуется несколькими слоями, допускает aliases, а число шагов ограничивается разными значениями.</detail>
+      <action>Использовать Zod-схемы для HTTP запроса, шага плана и входа каждого инструмента. Нормализовать совместимые форматы только на границе и исполнять только валидированную форму. Выбрать единый лимит плана, например 8–12 шагов.</action>
+      <test>Неизвестный tool, неверные аргументы, чрезмерный план и invalid request не должны запускать инструменты.</test>
+    </finding>
+    <finding id="F7" severity="medium" files="src/core/reporter.js;scripts/full-dump.mjs">
+      <title>Отчёты и XML-дампы могут содержать чувствительные данные</title>
+      <detail>Трассировка может сохранять запросы, фрагменты кода и данные sandbox. Метод commitAndSavePdf() фактически сохраняет XML. Скрипт full dump включает локальные отчёты и sandbox.</detail>
+      <action>Переименовать ложный PDF-метод либо реализовать PDF; добавить opt-in, редактирование секретов, retention policy, экранирование XML-атрибутов и исключение чувствительных файлов. Закрепить версию repomix вместо npx latest.</action>
+    </finding>
+    <finding id="F8" severity="medium" file="src/core/neuralRouter.js">
+      <title>Маршрутизатор следует считать экспериментальной эвристикой</title>
+      <detail>Классификация опирается на вручную заданные признаки и веса. Автообновление весов по неподтверждённым результатам может закреплять ошибочные labels.</detail>
+      <action>Описывать как эвристический роутер, измерять на размеченных примерах, не обучать автоматически на неподтверждённых результатах; feedback хранить как кандидаты до оценки.</action>
+    </finding>
+    <finding id="F9" severity="medium" files="package.json;tests/">
+      <title>Тестовые команды должны запускать предсказуемые наборы</title>
+      <detail>В tests/ лежат unit/integration файлы, ручные test-*.js и бенчмарки. Автоматический glob может запускать сценарии с побочными действиями.</detail>
+      <action>Разделить unit, integration, llm и benchmark scripts; передавать Node test runner явный список. Unit-тесты не должны требовать GGUF или GPU.</action>
+    </finding>
+    <finding id="F10" severity="medium" files="src/core/engine.js;src/config/index.js;tests/large-benchmark.js">
+      <title>Intel GPU backend и VRAM-метрики пока не подтверждены кодом</title>
+      <detail>Конфигурация задаёт gpuLayers/contextSize, но getLlama() вызывается без явного GPU backend. Benchmark измеряет время и heap Node.js, но не VRAM.</detail>
+      <action>Проверить поддержку Vulkan в точной версии node-llama-cpp и конкретном окружении. Добавить фактические GPU/VRAM метрики инструментами ОС и фиксировать конфигурацию прогона.</action>
+    </finding>
+  </critical_findings>
+
+  <recommended_architecture>
+    <module path="src/providers/">Provider adapters: llama.cpp, затем OpenAI-compatible или другой backend.</module>
+    <module path="src/agent/runAgent.js">Общий цикл планирования, исполнения, проверки результата и событий.</module>
+    <module path="src/api/">HTTP request validation и JSON/SSE transport без прямой зависимости от модели.</module>
+    <module path="src/core/">Provider-neutral executor, plan parser/validator, context and policy.</module>
+    <module path="src/tools/">Инструменты со схемами аргументов и проверками доступа.</module>
+    <contract>Замена модели должна требовать конфигурацию и новый адаптер, но не переписывание API, executor и tool registry.</contract>
+  </recommended_architecture>
+
+  <model_provider_contract>
+    <method name="initialize">Однократная инициализация backend; concurrent calls ждут один Promise.</method>
+    <method name="generate">Принимает нормализованный список сообщений и параметры генерации; возвращает нормализованный текст и usage.</method>
+    <method name="stream">Опционально выдаёт нормализованные text_delta, usage, error и done события.</method>
+    <method name="close">Освобождает ресурсы модели и контекста.</method>
+    <capabilities>Провайдер сообщает modelId, backend, supportsStreaming, supportsJsonSchema и ограничения контекста.</capabilities>
+    <configuration>MODEL_PROVIDER, MODEL_ID, MODEL_PATH, GPU_BACKEND, GPU_LAYERS, CONTEXT_SIZE, а для удалённого провайдера — BASE_URL и секрет из env.</configuration>
+  </model_provider_contract>
+
+  <intel_arc_optimization>
+    <baseline gpu="Intel Arc A-Series" example="A580 8GB">
+      <model>Начать с уже заявленной в README 7B GGUF Q4_K_M.</model>
+      <backend>Проверить Vulkan на целевой ОС, драйвере и установленной сборке node-llama-cpp; не предполагать поддержку CUDA.</backend>
+      <gpu_layers>GPU_LAYERS=99 — исходная экспериментальная гипотеза, не доказанный оптимум.</gpu_layers>
+      <context>Измерить 2048, затем 4096; более крупный контекст пробовать только после проверки свободной VRAM.</context>
+    </baseline>
+    <benchmark_matrix>
+      <profile model="Q4_K_M" context="2048" gpu_layers="99" backend="проверенный Vulkan"/>
+      <profile model="Q4_K_M" context="4096" gpu_layers="99" backend="тот же backend"/>
+      <profile model="Q4_K_M" context="8192" gpu_layers="99" backend="только если предыдущий профиль стабилен"/>
+    </benchmark_matrix>
+    <method>Менять один параметр за прогон. Использовать фиксированный набор задач и несколько повторов. Разделять холодную загрузку и прогретый inference.</method>
+    <metrics>
+      <metric>ОС, GPU, версия драйвера, node-llama-cpp и backend.</metric>
+      <metric>Модель, quantization, context, GPU layers и параметры batch, если backend их поддерживает.</metric>
+      <metric>Время загрузки, prompt evaluation speed, generation tokens/sec, latency p50/p95.</metric>
+      <metric>Peak VRAM, системная RAM и GPU utilization через инструменты целевой ОС.</metric>
+      <metric>Валидность плана, успешность tools, число retries и качество итогов.</metric>
+    </metrics>
+    <caution>Q4_K_M, 99 GPU layers и контекст 8192 не гарантируют одинаковый результат на разных ОС, драйверах и сборках. Публиковать только измеренные результаты с полным описанием среды.</caution>
+  </intel_arc_optimization>
+
+  <small_model_quality>
+    <practice>Предпочитать несколько узких инструментов одному универсальному shell-инструменту.</practice>
+    <practice>Ограничивать prompt компактной релевантной историей и структурированными результатами tools.</practice>
+    <practice>Проверять план и аргументы до выполнения; при ошибке возвращать модели короткую структурированную ошибку.</practice>
+    <practice>Проверять результат действия отдельным инструментом: например, повторно читать созданный файл.</practice>
+    <practice>Вести фиксированный evaluation set с задачами чата, планирования, путей, отказа, многошагового выполнения и самокоррекции.</practice>
+    <practice>Не считать память, пользовательские файлы, вывод сканера или tool output доверенными инструкциями.</practice>
+  </small_model_quality>
+
+  <implementation_roadmap>
+    <step order="1">Исправить возможный deadlock gpuMutex и покрыть self-correction integration-тестом.</step>
+    <step order="2">Перевести strictSandbox на контекст запроса; заблокировать workspace-команды в строгом режиме.</step>
+    <step order="3">Вынести единый agent loop, чтобы JSON и SSE выполняли одинаковые действия.</step>
+    <step order="4">Добавить Zod-схемы для API, планов и аргументов инструментов; унифицировать max steps.</step>
+    <step order="5">Сделать provider interface и вынести текущий llama.cpp backend в адаптер.</step>
+    <step order="6">Разделить сессии и историю диалога от глобальной модели; добавить Promise-lock инициализации.</step>
+    <step order="7">Разделить unit/integration/LLM тесты и настроить явные npm scripts.</step>
+    <step order="8">Добавить второй provider и подтвердить, что API, executor и tools не меняются.</step>
+    <step order="9">Измерить Intel Arc baseline по матрице настройки; обновить README только результатами измерений.</step>
+    <step order="10">После стабилизации расширять toolset, память, роутер и режим свободного доступа.</step>
+  </implementation_roadmap>
+
+  <definition_of_done>
+    <criterion>ActionRetry и self-correction работают без deadlock.</criterion>
+    <criterion>JSON и SSE используют один и тот же agent execution path.</criterion>
+    <criterion>Strict mode не может выйти за sandbox и не запускает команды с доступом к workspace.</criterion>
+    <criterion>Замена LLM происходит конфигурацией/адаптером, без изменения tools и agent orchestration.</criterion>
+    <criterion>Unit test suite проходит без локальной модели и GPU.</criterion>
+    <criterion>Intel Arc performance claims подтверждены воспроизводимыми VRAM, latency, throughput и quality результатами.</criterion>
+    <criterion>XML отчёты и full dumps не сохраняют секреты или пользовательские файлы без opt-in.</criterion>
+  </definition_of_done>
+</project_advisory>
