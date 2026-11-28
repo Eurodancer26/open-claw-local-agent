@@ -276,7 +276,7 @@ describe('Параллельные запросы: разные режимы н�
 
 describe(
   'Свободный режим: HTTP API (LLM)',
-  { skip: !process.env.RUN_LLM_TESTS },
+  { skip: !process.env.RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false },
   () => {
     const BASE = 'http://127.0.0.1:3000';
     const waitForFile = async (abs, timeoutMs = 3000) => {

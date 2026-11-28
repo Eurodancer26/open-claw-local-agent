@@ -1,7 +1,7 @@
-import fs from 'fs';
+﻿import fs from 'fs';
 import path from 'path';
 import http from 'http';
-import { toolsRegistry } from '../src/tools/registry.js';
+import { toolsRegistry } from '../../src/tools/registry.js';
 
 const SANDBOX_DIR = path.join(process.cwd(), 'tests', 'sandbox');
 

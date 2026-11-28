@@ -1,8 +1,8 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { NeuralSkillRouter } from '../src/core/neuralRouter.js';
+import { NeuralSkillRouter } from '../../src/core/neuralRouter.js';
 
 async function runTest() {
   console.log('🧠 Инициализация нейро-роутера...');

@@ -109,7 +109,7 @@ describe('Конструкт АИ — Единый полный комплекс
 
   // --- БЛОК 2: LLM, СТРИМИНГ И АГЕНТИЧНЫЙ ЦИКЛ (при RUN_LLM_TESTS=true) ---
 
-  it('6. Сквозной HTTP-тест не-стриминга (stream: false)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
+  it('6. Сквозной HTTP-тест не-стриминга (stream: false)', { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 }, async () => {
     const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -123,7 +123,7 @@ describe('Конструкт АИ — Единый полный комплекс
     assert.ok(data.choices?.[0]?.message?.content);
   });
 
-  it('7. Сквозной тест SSE-стриминга (stream: true)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
+  it('7. Сквозной тест SSE-стриминга (stream: true)', { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 }, async () => {
     const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -152,7 +152,7 @@ describe('Конструкт АИ — Единый полный комплекс
     assert.equal(hasDoneMarker, true);
   });
 
-  it('8. Сквозной тест агентичного цикла Plan & Execute (создание и чтение файла)', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
+  it('8. Сквозной тест агентичного цикла Plan & Execute (создание и чтение файла)', { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 }, async () => {
     const targetFile = 'tests/sandbox/unified-agent-test.txt';
     await fs.rm(path.resolve(targetFile), { force: true }).catch(() => {});
 
@@ -178,7 +178,7 @@ describe('Конструкт АИ — Единый полный комплекс
     await fs.rm(path.resolve(targetFile), { force: true });
   });
 
-  it('9. Сквозной тест самокоррекции агента при ошибке пути', { skip: !RUN_LLM_TESTS, timeout: 300_000 }, async () => {
+  it('9. Сквозной тест самокоррекции агента при ошибке пути', { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 }, async () => {
     const targetFile = 'tests/sandbox/unified-correction.txt';
     await fs.rm(path.resolve(targetFile), { force: true }).catch(() => {});
 

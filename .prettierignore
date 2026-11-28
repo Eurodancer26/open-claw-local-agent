@@ -1,0 +1,10 @@
+node_modules
+reports
+mind
+models
+tests/sandbox
+tests/free_mode
+package-lock.json
+repomix-output.xml
+full-project-dump.xml
+*.log

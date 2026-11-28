@@ -8,15 +8,27 @@
     "test": "node -e \"import('node:fs').then(fs=>fs.mkdirSync('reports/tests',{recursive:true}));\" && node -e \"import('node:child_process').then(({spawnSync})=>{const r=spawnSync(process.execPath,['--test','--test-reporter=junit'],{encoding:'utf8'}); require('node:fs').writeFileSync('reports/tests/test-report.xml', r.stdout || ''); if(r.stderr) process.stderr.write(r.stderr); process.exit(r.status ?? 1);});\"",
     "test:llm": "node -e \"import('node:fs').then(fs=>fs.mkdirSync('reports/tests',{recursive:true}));\" && node -e \"process.env.RUN_LLM_TESTS='true'; import('node:child_process').then(({spawnSync})=>{const r=spawnSync(process.execPath,['--test','--test-reporter=junit','tests/run-all.test.js'],{env:process.env,encoding:'utf8'}); require('node:fs').writeFileSync('reports/tests/test-llm-report.xml', r.stdout || ''); if(r.stderr) process.stderr.write(r.stderr); process.exit(r.status ?? 1);});\"",
     "dump": "npx repomix@latest",
-    "dump:full": "node scripts/full-dump.mjs"
+    "dump:full": "node scripts/full-dump.mjs",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "dependencies": {
     "express": "^5.3.0",
-    "node-llama-cpp": "^3.22.3",
-    "zod": "^4.6.7"
+    "node-llama-cpp": "^3.22.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.16.0",
+    "globals": "^17.0.0",
+    "prettier": "^3.10.0"
   }
 }

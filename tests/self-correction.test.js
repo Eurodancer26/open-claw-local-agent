@@ -45,7 +45,7 @@ describe('Конструкт АИ — Сквозной тест самокорр
 
   it(
     'Агент должен обработать ошибку, запустить самокоррекцию и создать файл',
-    { skip: !RUN_LLM_TESTS, timeout: 300_000 },
+    { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 },
     async () => {
       console.log('   ▶ Отправка провокационной задачи агенту...');
 

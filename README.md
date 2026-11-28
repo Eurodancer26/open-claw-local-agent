@@ -246,6 +246,13 @@ open-claw-local-agent/
 ├── tests/
 │   ├── sandbox/                          # Изолированная директория (в .gitignore, кроме .gitkeep)
 │   ├── free_mode/                        # Каталог свободного режима (в .gitignore, кроме .gitkeep)
+│   ├── manual/                           # Ручные smoke-скрипты (вне авто-прогона node --test)
+│   │   ├── chat-completions.manual.js
+│   │   ├── multi-step-agent.manual.js
+│   │   ├── router.manual.js
+│   │   ├── sandbox-agent.manual.js
+│   │   ├── self-correction.manual.js
+│   │   └── stream.manual.js
 │   ├── agent-loop.test.js
 │   ├── analyze-project.test.js
 │   ├── benchmark.js
@@ -262,14 +269,15 @@ open-claw-local-agent/
 │   ├── runcommand-sandbox.test.js
 │   ├── self-correction.test.js
 │   ├── session-history.test.js
-│   ├── stream-abort.test.js
-│   ├── test-multi-step-agent.js
-│   ├── test-router.js
-│   ├── test-sandbox-agent.js
-│   ├── test-self-correction.js
-│   ├── test-stream.js
-│   └── test.js
+│   └── stream-abort.test.js
+├── .editorconfig
+├── .github/
+│   └── workflows/
+│       └── ci.yml                    # CI: npm ci + lint + test (Node 20/22)
 ├── .gitignore
+├── .nvmrc                        # 20.19.0
+├── .prettierrc.json
+├── eslint.config.js               # ESLint 10 (flat config)
 ├── package.json
 └── README.md
 ```
@@ -279,7 +287,7 @@ open-claw-local-agent/
 ## Установка и быстрый старт
 
 ### Требования
-* **Node.js** `20.x` или новее (ES Modules + `node:test`).
+* **Node.js** `20.x` или новее (ES Modules + `node:test`). Закреплено: `.nvmrc` = `20.19.0`, `engines.node` = `>=20.9.0`.
 * Локальная GGUF-модель (по умолчанию `models/qwen2.5-7b-instruct-q4_k_m.gguf`).
 * GPU с поддержкой Vulkan / CUDA / Metal (или CPU-режим `node-llama-cpp`).
 
@@ -316,10 +324,20 @@ open-claw-local-agent/
 | `npm start` | Запуск HTTP-сервера и веб-интерфейса на `127.0.0.1:3000`. |
 | `npm test` | Быстрые unit- и интеграционные тесты (без LLM) с экспортом JUnit XML в `reports/tests/test-report.xml`. |
 | `npm run test:llm` | Полный прогон, включая LLM, SSE-стриминг, Plan & Execute и Self-Correction (`RUN_LLM_TESTS=true`). |
-| `node tests/test-router.js` | Проверка нейро-роутера: диалоговая память, смена контекста, длинные промты, `save()/load()`. |
+| `node tests/manual/router.manual.js` | Проверка нейро-роутера: диалоговая память, смена контекста, длинные промты, `save()/load()`. |
 | `node tests/large-benchmark.js` | Нагрузочный бенчмарк (4 категории) с замером `tok/s` и Heap. |
 | `node tests/compare-reports.js` | Сравнение сохранённых JSON-отчётов бенчмарков. |
 | `npm run dump:full` | Упаковка кода + `tests/sandbox/` + `reports/` в единый XML (`full-project-dump.xml`). |
+| `npm run lint` | ESLint 10 (flat config). Ошибки блокируют CI, предупреждения — baseline. |
+| `npm run lint:fix` | ESLint с автоисправлением. |
+| `npm run format` | Prettier: форматирование всех файлов. |
+| `npm run format:check` | Prettier: проверка форматирования без записи. |
+
+> **Скипнутые тесты.** 7 тестов помечены `skip` и требуют живой LLM при запущенном `npm start`: SSE-стриминг, Plan & Execute, Self-Correction, HTTP API (`run-all.test.js`, `planner.test.js`, `agent-loop.test.js`, `self-correction.test.js`, `free-mode.test.js`). Их запускает `npm run test:llm` (`RUN_LLM_TESTS=true`); в обычном `npm test` они намеренно скипаются и не считаются провалом.
+
+> **Ручные скрипты.** `tests/manual/*.manual.js` — smoke-проверки против живого сервера (`npm start`), исключены из авто-прогона `node --test`. Запуск вручную, напр. `node tests/manual/router.manual.js`.
+
+> **Линт и формат.** `npm run lint` использует ESLint 10 (flat config) и сейчас проходит без ошибок; остаётся ~19 предупреждений (escape-символы в regex, control-regex в sanitize, throw в finally — осознанные приёмы). `format:check` в CI не включён: он требует единоразового `npm run format` (переформат ~36 файлов — отдельное решение). CI: `.github/workflows/ci.yml` гоняет `npm ci` + `npm run lint` + `npm test` на Ubuntu, Node 20.x и 22.x.
 
 ---
 
