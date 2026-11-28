@@ -45,12 +45,15 @@ describe('Конструкт АИ — Сквозной тест самокорр
 
   it(
     'Агент должен обработать ошибку, запустить самокоррекцию и создать файл',
-    { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 },
+    {
+      skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false,
+      timeout: 300_000
+    },
     async () => {
       console.log('   ▶ Отправка провокационной задачи агенту...');
 
       // Мы просим прочитать файл, которого еще нет, и записать в него текст.
-      // Логичный агент сначала попытается его прочитать (получит ошибку ENOENT), 
+      // Логичный агент сначала попытается его прочитать (получит ошибку ENOENT),
       // после чего сработает самокоррекция, и он переключится на запись/создание файла.
       const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
         method: 'POST',
@@ -76,7 +79,6 @@ describe('Конструкт АИ — Сквозной тест самокорр
       while (!doneReading) {
         const { value, done } = await reader.read();
         if (done) {
-          doneReading = true;
           break;
         }
 
@@ -103,11 +105,15 @@ describe('Конструкт АИ — Сквозной тест самокорр
       console.log('\n');
 
       // Проверяем, что в логах стрима промелькнуло сообщение о самокоррекции или успешном выполнении
-      const hasCorrected = fullStreamOutput.includes('самокоррекцию') || fullStreamOutput.includes('успешно выполнен');
+      const hasCorrected =
+        fullStreamOutput.includes('самокоррекцию') || fullStreamOutput.includes('успешно выполнен');
       assert.ok(hasCorrected, 'Агент должен отчитаться о выполнении или коррекции');
 
       // Проверяем, что файл в итоге РЕАЛЬНО появился на диске благодаря агенту
-      const fileExists = await fs.stat(path.resolve(targetFile)).then(() => true).catch(() => false);
+      const fileExists = await fs
+        .stat(path.resolve(targetFile))
+        .then(() => true)
+        .catch(() => false);
       assert.equal(fileExists, true, 'Файл должен быть создан на диске в результате работы агента');
 
       const content = await fs.readFile(path.resolve(targetFile), 'utf8');

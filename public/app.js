@@ -101,6 +101,190 @@ resetSessionBtn.addEventListener('click', async () => {
   }
 });
 
+// Блок 6.3: инлайн-подтверждение опасного действия в чате (без window.confirm).
+function requestUserConfirmation(payload) {
+  return new Promise((resolve) => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message message--assistant';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'message__bubble confirm-bubble';
+
+    const title = document.createElement('div');
+    title.className = 'confirm-title';
+    title.textContent = `⚠️ Требуется подтверждение: ${payload.tool}`;
+
+    const detail = document.createElement('pre');
+    detail.className = 'confirm-detail';
+    detail.textContent = JSON.stringify(payload.arguments ?? {}, null, 2);
+
+    const actions = document.createElement('div');
+    actions.className = 'confirm-actions';
+
+    const yes = document.createElement('button');
+    yes.type = 'button';
+    yes.className = 'confirm-btn confirm-btn--yes';
+    yes.textContent = 'Подтвердить';
+
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.className = 'confirm-btn confirm-btn--no';
+    no.textContent = 'Отменить';
+
+    const finish = (approved) => {
+      yes.disabled = true;
+      no.disabled = true;
+      resolve(approved);
+    };
+    yes.addEventListener('click', () => finish(true));
+    no.addEventListener('click', () => finish(false));
+
+    actions.appendChild(yes);
+    actions.appendChild(no);
+    bubble.appendChild(title);
+    bubble.appendChild(detail);
+    bubble.appendChild(actions);
+    wrapper.appendChild(bubble);
+    chatMessages.appendChild(wrapper);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  });
+}
+
+// Блок 6.4: выбор транспорта — SSE (по умолчанию) или WebSocket.
+const transportSelect = document.getElementById('transport-select');
+
+function applyDelta(parsed, state, bubble) {
+  const delta = parsed.choices?.[0]?.delta?.content;
+  if (delta) {
+    state.full += delta;
+    bubble.textContent = state.prefix + state.full;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    return true;
+  }
+  return false;
+}
+
+async function handleConfirmEvent(parsed, state, bubble, confirmFn) {
+  const approved = await requestUserConfirmation(parsed);
+  try {
+    await confirmFn(parsed.id, approved);
+  } catch {
+    // Сервер отклонит действие по таймауту, если ответ не дошёл.
+  }
+  state.prefix += approved ? '✅ Подтверждено\n' : '⛔ Отменено\n';
+  bubble.textContent = state.prefix + state.full;
+}
+
+// SSE-транспорт (по умолчанию).
+async function streamViaSSE(messages, strictSandbox, state, bubble) {
+  const response = await fetch('/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, stream: true, strictSandbox })
+  });
+
+  if (!response.ok) throw new Error(`Ошибка сервера: ${response.status}`);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+
+      const payload = trimmed.slice(5).trim();
+      if (payload === '[DONE]') continue;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(payload);
+      } catch {
+        continue; // неполный чанк
+      }
+
+      if (parsed.type === 'confirmation_request') {
+        await handleConfirmEvent(parsed, state, bubble, (id, approved) =>
+          fetch('/v1/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, approved })
+          })
+        );
+        continue;
+      }
+
+      applyDelta(parsed, state, bubble);
+    }
+  }
+}
+
+// WebSocket-транспорт: сервер проксирует тот же chat-поток.
+function streamViaWebSocket(messages, strictSandbox, state, bubble) {
+  return new Promise((resolve, reject) => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/v1/ws`);
+    let settled = false;
+
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      fn(arg);
+    };
+
+    ws.addEventListener('open', () => {
+      ws.send(JSON.stringify({ type: 'chat', messages, strictSandbox }));
+    });
+
+    ws.addEventListener('message', async (ev) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+
+      if (parsed.type === 'done') {
+        ws.close();
+        finish(resolve);
+        return;
+      }
+      if (parsed.type === 'error') {
+        ws.close();
+        finish(reject, new Error(parsed.error || 'Ошибка WebSocket'));
+        return;
+      }
+      if (parsed.type === 'confirmation_request') {
+        await handleConfirmEvent(parsed, state, bubble, (id, approved) => {
+          ws.send(JSON.stringify({ type: 'confirm', id, approved }));
+        });
+        return;
+      }
+
+      applyDelta(parsed, state, bubble);
+    });
+
+    ws.addEventListener('error', () => finish(reject, new Error('Соединение WebSocket разорвано')));
+    ws.addEventListener('close', () => finish(resolve));
+  });
+}
+
+async function streamChat(messages, strictSandbox, state, bubble) {
+  const transport = transportSelect && transportSelect.value === 'ws' ? 'ws' : 'sse';
+  if (transport === 'ws') {
+    return streamViaWebSocket(messages, strictSandbox, state, bubble);
+  }
+  return streamViaSSE(messages, strictSandbox, state, bubble);
+}
+
 chatForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = userInput.value.trim();
@@ -116,58 +300,12 @@ chatForm.addEventListener('submit', async (e) => {
   resetSessionBtn.disabled = true;
 
   const assistantBubble = appendMessage('assistant', '');
-  let fullAssistantResponse = '';
+  const state = { prefix: '', full: '' };
 
   try {
-    const response = await fetch('/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: messageHistory,
-        stream: true,
-        strictSandbox: sandboxToggle.checked
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Ошибка сервера: ${response.status}`);
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-
-        const payload = trimmed.slice(5).trim();
-        if (payload === '[DONE]') continue;
-
-        try {
-          const parsed = JSON.parse(payload);
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            fullAssistantResponse += delta;
-            assistantBubble.textContent = fullAssistantResponse;
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-          }
-        } catch {
-          // Игнорируем неполные чанки
-        }
-      }
-    }
-
-    if (fullAssistantResponse) {
-      messageHistory.push({ role: 'assistant', content: fullAssistantResponse });
+    await streamChat(messageHistory, sandboxToggle.checked, state, assistantBubble);
+    if (state.full) {
+      messageHistory.push({ role: 'assistant', content: state.full });
       trimHistory();
     }
   } catch (err) {

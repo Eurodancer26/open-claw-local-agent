@@ -1,12 +1,41 @@
 // src/api/chatFormatter.js
+import { toolsRegistry } from '../tools/registry.js';
+
 export const MAX_CHAT_CODE_CHARS = 4000;
 
 const FORBIDDEN_TOOL_NAMES = [
-  'chat', 'strictMode', 'date', 'time', 'getDate', 'getTime',
-  'format', 'formatCode', 'prettier', 'lint', 'deploy', 'hash',
-  'generateCode', 'bundle', 'rollup', 'webpack', 'publish',
-  'fetch', 'http', 'curl', 'browser', 'search', 'webSearch',
-  'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch'
+  'chat',
+  'strictMode',
+  'date',
+  'time',
+  'getDate',
+  'getTime',
+  'format',
+  'formatCode',
+  'prettier',
+  'lint',
+  'deploy',
+  'hash',
+  'generateCode',
+  'bundle',
+  'rollup',
+  'webpack',
+  'publish',
+  'fetch',
+  'http',
+  'curl',
+  'browser',
+  'search',
+  'webSearch',
+  'mkdir',
+  'rmdir',
+  'rm',
+  'cp',
+  'mv',
+  'touch',
+  'grep',
+  'ripgrep',
+  'findstr'
 ];
 
 function parseStepResultData(rawResult) {
@@ -30,13 +59,19 @@ export function formatStepResultForChat(toolName, rawResult) {
   const data = parseStepResultData(rawResult);
 
   if (toolName === 'readFile') {
-    const text = typeof rawResult === 'string'
-      ? (data && typeof data.content === 'string' ? data.content : rawResult)
-      : (typeof data?.content === 'string' ? data.content : JSON.stringify(data, null, 2));
+    const text =
+      typeof rawResult === 'string'
+        ? data && typeof data.content === 'string'
+          ? data.content
+          : rawResult
+        : typeof data?.content === 'string'
+          ? data.content
+          : JSON.stringify(data, null, 2);
 
-    const clipped = text.length > MAX_CHAT_CODE_CHARS
-      ? `${text.slice(0, MAX_CHAT_CODE_CHARS)}\n... [обрезано, всего ${text.length} символов]`
-      : text;
+    const clipped =
+      text.length > MAX_CHAT_CODE_CHARS
+        ? `${text.slice(0, MAX_CHAT_CODE_CHARS)}\n... [обрезано, всего ${text.length} символов]`
+        : text;
 
     return `✔ Успешно. Содержимое файла:\n\`\`\`\n${clipped}\n\`\`\`\n`;
   }
@@ -63,9 +98,7 @@ export function formatStepResultForChat(toolName, rawResult) {
 
   if (toolName === 'deleteFile') {
     const filePath = data?.filePath || data?.path || data?.target;
-    return filePath
-      ? `✔ Успешно. Файл удалён: ${filePath}\n`
-      : '✔ Успешно. Файл удалён.\n';
+    return filePath ? `✔ Успешно. Файл удалён: ${filePath}\n` : '✔ Успешно. Файл удалён.\n';
   }
 
   if (toolName === 'generateUnitTest') {
@@ -91,12 +124,16 @@ export function formatStepResultForChat(toolName, rawResult) {
     const reportObj = data?.report || (data && typeof data.totalFiles === 'number' ? data : null);
 
     if (reportObj) {
-      const extList = Object.entries(reportObj.byExtension || {})
-        .map(([ext, count]) => `${ext}: ${count}`)
-        .join(', ') || 'нет';
-      const largestList = Array.isArray(reportObj.largestFiles) && reportObj.largestFiles.length > 0
-        ? reportObj.largestFiles.map((f) => `${f.path} (${f.lines} строк, ${f.sizeBytes} Б)`).join('; ')
-        : 'нет';
+      const extList =
+        Object.entries(reportObj.byExtension || {})
+          .map(([ext, count]) => `${ext}: ${count}`)
+          .join(', ') || 'нет';
+      const largestList =
+        Array.isArray(reportObj.largestFiles) && reportObj.largestFiles.length > 0
+          ? reportObj.largestFiles
+              .map((f) => `${f.path} (${f.lines} строк, ${f.sizeBytes} Б)`)
+              .join('; ')
+          : 'нет';
 
       const lines = [
         '✔ Успешно. Краткая статистика:',
@@ -107,27 +144,48 @@ export function formatStepResultForChat(toolName, rawResult) {
       ];
 
       if (reportObj.packageInfo) {
-        lines.push(`- Пакет: ${reportObj.packageInfo.name}@${reportObj.packageInfo.version} (${reportObj.packageInfo.type})`);
+        lines.push(
+          `- Пакет: ${reportObj.packageInfo.name}@${reportObj.packageInfo.version} (${reportObj.packageInfo.type})`
+        );
       }
 
       return `${lines.join('\n')}\n`;
     }
 
-    const summaryText = typeof rawResult === 'string' ? rawResult.trim() : JSON.stringify(data, null, 2);
+    const summaryText =
+      typeof rawResult === 'string' ? rawResult.trim() : JSON.stringify(data, null, 2);
     return `✔ Успешно. Результат анализа:\n${summaryText}\n`;
   }
 
+  if (toolName === 'searchInFiles') {
+    const items = Array.isArray(data?.results) ? data.results : [];
+    const header =
+      `✔ Успешно. Найдено совпадений: ${data?.totalMatches ?? items.length}` +
+      (data?.truncated ? ' (показаны не все)' : '') +
+      '.';
+    if (items.length === 0) return `${header}\n`;
+    const body = items
+      .slice(0, 50)
+      .map((r) => `${r.file}:${r.line}: ${String(r.text ?? '').trim()}`)
+      .join('\n');
+    return `${header}\n\`\`\`\n${body}\n\`\`\`\n`;
+  }
+
   if (toolName === 'listDir' && data && Array.isArray(data.items)) {
-    const listText = data.items.length > 0
-      ? data.items.map((item) => `${item.type === 'dir' ? '[dir]' : '[file]'} ${item.name}`).join(', ')
-      : 'пусто';
+    const listText =
+      data.items.length > 0
+        ? data.items
+            .map((item) => `${item.type === 'dir' ? '[dir]' : '[file]'} ${item.name}`)
+            .join(', ')
+        : 'пусто';
     return `✔ Успешно. Элементы: ${listText}\n`;
   }
 
   if (data && typeof data.message === 'string' && data.message.trim().length > 0) {
-    const extraSymbols = Array.isArray(data.detectedSymbols) && data.detectedSymbols.length > 0
-      ? ` (символы: ${data.detectedSymbols.join(', ')})`
-      : '';
+    const extraSymbols =
+      Array.isArray(data.detectedSymbols) && data.detectedSymbols.length > 0
+        ? ` (символы: ${data.detectedSymbols.join(', ')})`
+        : '';
     return `✔ Успешно. ${data.message}${extraSymbols}\n`;
   }
 
@@ -148,15 +206,17 @@ export function formatRoutingHint(routingDecision) {
   }
 
   const skill = routingDecision.selectedSkill || 'chat';
-  const confidencePct = typeof routingDecision.confidence === 'number'
-    ? (routingDecision.confidence * 100).toFixed(0)
-    : '0';
+  const confidencePct =
+    typeof routingDecision.confidence === 'number'
+      ? (routingDecision.confidence * 100).toFixed(0)
+      : '0';
 
-  const topSummary = Array.isArray(routingDecision.topSkills) && routingDecision.topSkills.length > 0
-    ? routingDecision.topSkills
-        .map((item) => `${item.skill}: ${(Number(item.score || 0) * 100).toFixed(0)}%`)
-        .join(', ')
-    : null;
+  const topSummary =
+    Array.isArray(routingDecision.topSkills) && routingDecision.topSkills.length > 0
+      ? routingDecision.topSkills
+          .map((item) => `${item.skill}: ${(Number(item.score || 0) * 100).toFixed(0)}%`)
+          .join(', ')
+      : null;
 
   const mode = routingDecision.mode;
 
@@ -210,7 +270,7 @@ function buildCognitiveRules(strictDefault) {
   return `ПРАВИЛА (СТРОГО):
 1. Беседа / вопросы / приветствия → ответ ТОЛЬКО текстом на русском. Задачи с файлами → ответ ТОЛЬКО JSON-массивом. Не смешивай.
 2. Формат плана: [{"step":1,"tool":"writeFile","arguments":{"filePath":"...","content":"..."},"description":"..."}]. БЕЗ markdown, БЕЗ \`\`\`json, БЕЗ текста до и после JSON.
-3. Только 8 инструментов: readFile, writeFile, createDir, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand. Инструментов ${FORBIDDEN_TOOLS_LIST} и любых других НЕ СУЩЕСТВУЕТ.
+3. Только ${Object.keys(toolsRegistry).length} инструментов: ${Object.keys(toolsRegistry).join(', ')}. Инструментов ${FORBIDDEN_TOOLS_LIST} и любых других НЕ СУЩЕСТВУЕТ.
 4. Если инструмента нет (дата, погода, курс) → ответ ТОЛЬКО текстом: «У меня нет такого инструмента».
 ${pathRule}
 ${outsideRule}
@@ -225,6 +285,7 @@ ${outsideRule}
    - анализ / структура / статистика / аудит проекта → analyzeProject
    - сгенерировать unit-тест по модулю → generateUnitTest
    - версия node/npm, git status/diff, листинг корня через CLI → runCommand (в СТРОГОМ режиме git status/diff ЗАПРЕЩЕНЫ — они видят весь репозиторий; для листинга внутри песочницы используй listDir)
+   - поиск текста/имени по содержимому файлов (аналог grep) → searchInFiles (аргументы: query, dirPath, regex, maxResults)
 10. СОЗДАНИЕ ПАПКИ vs ФАЙЛА: если пользователь говорит «создай папку X», «создай директорию X», «сделай каталог X» — используй createDir с dirPath=X. НЕ используй writeFile с пустым content для создания папки.
 11. В свободном режиме абсолютные пути (C:\\..., D:\\..., //server/...) ЗАПРЕЩЕНЫ. Используй только относительные от корня проекта.
 

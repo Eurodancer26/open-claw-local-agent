@@ -29,17 +29,26 @@ async function runTest() {
       item.expectedSkill,
       `Ожидался скил "${item.expectedSkill}" для "${item.text}", но получен "${result.selectedSkill}"`
     );
-    assert.ok(result.confidence > 0.4, `Слишком низкая уверенность (${result.confidence}) для "${item.text}"`);
+    assert.ok(
+      result.confidence > 0.4,
+      `Слишком низкая уверенность (${result.confidence}) для "${item.text}"`
+    );
     assert.equal(result.memorySnapshot.length, 8, 'Размер hiddenState должен быть равен 8');
 
-    console.log(`   🎯 Выбранный скил: ${result.selectedSkill} (уверенность: ${(result.confidence * 100).toFixed(1)}%)`);
+    console.log(
+      `   🎯 Выбранный скил: ${result.selectedSkill} (уверенность: ${(result.confidence * 100).toFixed(1)}%)`
+    );
     console.log(`   🧭 Широкий/смешанный запрос: ${result.isBroadOrMixed ? 'да' : 'нет'}`);
-    console.log(`   📊 Вероятности: chat=${result.scores.chat}, file_ops=${result.scores.file_ops}, system_cmd=${result.scores.system_cmd}`);
+    console.log(
+      `   📊 Вероятности: chat=${result.scores.chat}, file_ops=${result.scores.file_ops}, system_cmd=${result.scores.system_cmd}`
+    );
     console.log(`   🧬 Память (hiddenState): [${result.memorySnapshot.join(', ')}]`);
     console.log('--------------------------------------------------');
   }
 
-  console.log('\n--- 2. Проверка длинных и составных промтов (сброс памяти перед каждым кейсом) ---\n');
+  console.log(
+    '\n--- 2. Проверка длинных и составных промтов (сброс памяти перед каждым кейсом) ---\n'
+  );
 
   const longPrompts = [
     {
@@ -81,9 +90,15 @@ async function runTest() {
       `Для промта "${item.text.slice(0, 45)}..." ожидалось isBroadOrMixed=${item.expectBroad}, но получено ${result.isBroadOrMixed}`
     );
 
-    const topStr = result.topSkills.map((s) => `${s.skill}:${(s.score * 100).toFixed(1)}%`).join(', ');
-    console.log(`📝 Промт (${item.text.length} симв.): "${item.text.slice(0, 75).replace(/\s+/g, ' ')}..."`);
-    console.log(`   🎯 Лидер: ${result.selectedSkill} (${(result.confidence * 100).toFixed(1)}%) | isBroadOrMixed=${result.isBroadOrMixed}`);
+    const topStr = result.topSkills
+      .map((s) => `${s.skill}:${(s.score * 100).toFixed(1)}%`)
+      .join(', ');
+    console.log(
+      `📝 Промт (${item.text.length} симв.): "${item.text.slice(0, 75).replace(/\s+/g, ' ')}..."`
+    );
+    console.log(
+      `   🎯 Лидер: ${result.selectedSkill} (${(result.confidence * 100).toFixed(1)}%) | isBroadOrMixed=${result.isBroadOrMixed}`
+    );
     console.log(`   📈 Распределение: ${topStr}`);
     console.log('--------------------------------------------------');
   }
@@ -103,15 +118,32 @@ async function runTest() {
   // Проверка reinforceOutcome без порчи текущего hiddenState
   reloadedRouter.resetMemory();
   const baselineHidden = [...reloadedRouter.predict('Привет').memorySnapshot];
-  const feedback = reloadedRouter.reinforceOutcome('Сделай краткую сводку по логам', 'file_ops', 0.1);
-  assert.equal(feedback.updated, true, 'reinforceOutcome должен обновить веса при низкой уверенности или расхождении');
+  const feedback = reloadedRouter.reinforceOutcome(
+    'Сделай краткую сводку по логам',
+    'file_ops',
+    0.1
+  );
+  assert.equal(
+    feedback.updated,
+    true,
+    'reinforceOutcome должен обновить веса при низкой уверенности или расхождении'
+  );
   const currentHiddenAfterReinforce = reloadedRouter.hiddenState.map((n) => Number(n.toFixed(3)));
-  assert.deepEqual(currentHiddenAfterReinforce, baselineHidden, 'reinforceOutcome не должен сбивать текущий hiddenState');
+  assert.deepEqual(
+    currentHiddenAfterReinforce,
+    baselineHidden,
+    'reinforceOutcome не должен сбивать текущий hiddenState'
+  );
 
   await fs.unlink(tempWeightsPath).catch(() => {});
-  assert.ok(afterReload >= beforeTrain, 'После обучения и перезагрузки весов score для system_cmd не должен упасть');
+  assert.ok(
+    afterReload >= beforeTrain,
+    'После обучения и перезагрузки весов score для system_cmd не должен упасть'
+  );
 
-  console.log('\n💾 Проверка save()/load() и reinforceOutcome() на временном файле прошла успешно!');
+  console.log(
+    '\n💾 Проверка save()/load() и reinforceOutcome() на временном файле прошла успешно!'
+  );
   console.log('✅ Все assertions для NeuralSkillRouter пройдены!');
 }
 

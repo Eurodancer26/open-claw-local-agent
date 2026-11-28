@@ -35,7 +35,9 @@ describe('planParser: полнота набора инструментов', () 
 
 describe('planParser: регрессия createDir', () => {
   test('createDir в массиве шагов', () => {
-    const plan = extractActionPlan('[{"step":1,"tool":"createDir","arguments":{"dirPath":"new/dir"}}]');
+    const plan = extractActionPlan(
+      '[{"step":1,"tool":"createDir","arguments":{"dirPath":"new/dir"}}]'
+    );
     assert.equal(plan.length, 1);
     assert.equal(plan[0].tool, 'createDir');
     assert.equal(plan[0].arguments.dirPath, 'new/dir');
@@ -49,7 +51,8 @@ describe('planParser: регрессия createDir', () => {
   });
 
   test('createDir в markdown-обёртке', () => {
-    const raw = 'Вот план:\n```json\n[{"step":1,"tool":"createDir","arguments":{"dirPath":"a"}}]\n```';
+    const raw =
+      'Вот план:\n```json\n[{"step":1,"tool":"createDir","arguments":{"dirPath":"a"}}]\n```';
     const plan = extractActionPlan(raw);
     assert.equal(plan.length, 1);
     assert.equal(plan[0].tool, 'createDir');

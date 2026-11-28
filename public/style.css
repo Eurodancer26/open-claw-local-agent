@@ -18,7 +18,7 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background-color: var(--bg-main);
   color: var(--text-main);
   height: 100vh;
@@ -73,6 +73,38 @@ body {
   gap: 10px;
 }
 
+/* Переключатель транспорта (SSE / WebSocket) — Блок 6.4 */
+.transport-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--bg-input);
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.transport-control__label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.transport-control__select {
+  background-color: transparent;
+  color: var(--text);
+  border: none;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+}
+
+.transport-control__select option {
+  color: #24292f;
+}
+
 /* Переключатель режима песочницы */
 .sandbox-control {
   display: flex;
@@ -105,7 +137,10 @@ body {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background-color 0.2s ease;
 }
 
 .reset-btn:hover:not(:disabled) {
@@ -143,7 +178,7 @@ body {
 
 .switch__slider::before {
   position: absolute;
-  content: "";
+  content: '';
   height: 18px;
   width: 18px;
   left: 3px;
@@ -257,4 +292,55 @@ body {
 .input-bar__button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* Блок 6.3: инлайн-подтверждение опасного действия */
+.confirm-bubble {
+  border: 1px solid #d9822b;
+  background: rgba(217, 130, 43, 0.12);
+}
+
+.confirm-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.confirm-detail {
+  margin: 0 0 10px;
+  padding: 8px;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.confirm-btn {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.confirm-btn--yes {
+  background: #2ea043;
+  color: #fff;
+}
+
+.confirm-btn--no {
+  background: #d0d7de;
+  color: #24292f;
+}
+
+.confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

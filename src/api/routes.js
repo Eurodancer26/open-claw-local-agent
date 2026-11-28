@@ -1,9 +1,24 @@
 // src/api/routes.js
 import { Router } from 'express';
+import { createHash } from 'node:crypto';
 import { initLlamaEngine } from '../core/engine.js';
-import { getToolsSystemPrompt, DEFAULT_STRICT_SANDBOX } from '../tools/registry.js';
+import {
+  getToolsSystemPrompt,
+  DEFAULT_STRICT_SANDBOX,
+  toolsRegistry,
+  registerPluginTools
+} from '../tools/registry.js';
+import { loadPluginsFromDir, PLUGIN_DIR_NAME } from '../tools/pluginLoader.js';
+import { syncKnownToolsFromRegistry } from '../core/planParser.js';
+import path from 'node:path';
+import { WORKSPACE_ROOT } from '../tools/pathSecurity.js';
 import { executePlan } from '../core/executor.js';
-import { initMind, updateMindState, pushRecursiveThought, getMindContextSummary } from '../core/recursiveMind.js';
+import {
+  initMind,
+  updateMindState,
+  pushRecursiveThought,
+  getMindContextSummary
+} from '../core/recursiveMind.js';
 import { gpuMutex } from '../core/mutex.js';
 import { ExecutionTracer } from '../core/reporter.js';
 import { NeuralSkillRouter } from '../core/neuralRouter.js';
@@ -14,8 +29,14 @@ import {
   MAX_DIALOG_HISTORY_CHARS
 } from '../core/contextPruner.js';
 import { safeParseJsonPayload, extractActionPlan } from '../core/planParser.js';
-import { formatStepResultForChat, buildNonStreamPrompt, buildCognitivePrompt, formatRoutingHint } from './chatFormatter.js';
+import {
+  formatStepResultForChat,
+  buildNonStreamPrompt,
+  buildCognitivePrompt,
+  formatRoutingHint
+} from './chatFormatter.js';
 import { createClientAbortGuard, createAbortError, raceAgainstClientAbort } from './streamGuard.js';
+import { ConfirmGate } from './confirmGate.js';
 
 const router = Router();
 
@@ -23,6 +44,27 @@ const neuralRouter = new NeuralSkillRouter();
 neuralRouter.load().catch(() => {
   console.log('🧠 Нейро-роутер: используются стандартные веса по умолчанию');
 });
+
+// Блок 6.3: гейт интерактивного подтверждения опасных действий (deleteFile и т.п.).
+const confirmGate = new ConfirmGate();
+
+// Блок 6.5: загрузка плагинных инструментов из <корень проекта>/tools/*.plugin.mjs.
+// Вызывается на старте сервера; в тестах (без старта) остаётся только ядро.
+export async function initPlugins() {
+  const dir = path.join(WORKSPACE_ROOT, PLUGIN_DIR_NAME);
+  try {
+    const plugins = await loadPluginsFromDir(dir, {
+      onError: (msg) => console.warn(`⚠️ Плагин пропущен: ${msg}`)
+    });
+    const added = registerPluginTools(plugins);
+    if (added.length > 0) {
+      console.log(`🔌 Плагинные инструменты зарегистрированы: ${added.join(', ')}`);
+    }
+    syncKnownToolsFromRegistry();
+  } catch (error) {
+    console.warn(`⚠️ Не удалось загрузить плагины: ${error.message}`);
+  }
+}
 
 function inferActualSkillFromPlan(plan) {
   if (!Array.isArray(plan) || plan.length === 0) {
@@ -32,24 +74,108 @@ function inferActualSkillFromPlan(plan) {
   return allSystemCmd ? 'system_cmd' : 'file_ops';
 }
 
-async function applyRouterFeedback(userMessage, actualSkill, tracer, isTestRun) {
-  const feedback = neuralRouter.reinforceOutcome(userMessage, actualSkill);
-  if (!feedback.updated) {
+// Блок 6.2: уточнённый сигнал роутера. Если план только читает/перечисляет
+// (readFile / listDir / searchInFiles) и ничего не пишет и не анализирует —
+// это system_cmd, даже если формально пришёл не-runCommand-план.
+// Раньше любой не-runCommand-план жёстко помечался file_ops.
+function refinePlanSkill(plan) {
+  const base = inferActualSkillFromPlan(plan);
+  if (base !== 'file_ops' || !Array.isArray(plan)) return base;
+
+  const tools = new Set(plan.map((s) => s && s.tool).filter(Boolean));
+  const hasWriteOrAnalyze = ['writeFile', 'createDir', 'analyzeProject', 'generateUnitTest'].some(
+    (t) => tools.has(t)
+  );
+  const onlyReadOps =
+    tools.size > 0 &&
+    [...tools].every((t) => t === 'readFile' || t === 'listDir' || t === 'searchInFiles');
+
+  if (onlyReadOps && !hasWriteOrAnalyze) return 'system_cmd';
+  return 'file_ops';
+}
+
+// Дедупликация подтверждённых исходов: один и тот же запрос не должен
+// переучивать роутер много раз подряд (эхо-повторы, повторные запросы).
+const recentConfirmedKeys = new Map();
+const CONFIRMED_DEDUP_TTL_MS = 60_000;
+
+function confirmedKey(userMessage, actualSkill) {
+  const normalized = String(userMessage || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const digest = createHash('sha1').update(normalized).digest('hex').slice(0, 16);
+  return `${actualSkill}:${digest}`;
+}
+
+function isDuplicateConfirmed(key) {
+  const now = Date.now();
+  for (const [k, ts] of recentConfirmedKeys) {
+    if (now - ts > CONFIRMED_DEDUP_TTL_MS) recentConfirmedKeys.delete(k);
+  }
+  const prev = recentConfirmedKeys.get(key);
+  if (typeof prev === 'number' && now - prev <= CONFIRMED_DEDUP_TTL_MS) {
+    return true;
+  }
+  recentConfirmedKeys.set(key, now);
+  return false;
+}
+
+/**
+ * Блок 6.2: дообучение роутера ТОЛЬКО по подтверждённым успехам.
+ * Онлайн-подкрепление (reinforceOutcome) применяется сразу, батч — при
+ * накоплении порога в буфере роутера. Дубликаты в пределах TTL игнорируются;
+ * провалы и «мусорные» исходы сюда не попадают вообще.
+ */
+async function recordConfirmedOutcome(userMessage, actualSkill, tracer, isTestRun) {
+  const key = confirmedKey(userMessage, actualSkill);
+  if (isDuplicateConfirmed(key)) {
+    tracer.log(
+      'routes.js',
+      'RouterFeedback',
+      'INFO',
+      `Подтверждённый исход ${actualSkill} уже учтён недавно — пропуск`
+    );
     return;
   }
 
-  tracer.log(
-    'routes.js',
-    'NeuralRouter.reinforceOutcome',
-    'INFO',
-    `Дообучение роутера: ${feedback.previousSkill} (${(feedback.previousConfidence * 100).toFixed(1)}%) -> ${feedback.actualSkill} (${(feedback.newConfidence * 100).toFixed(1)}%)`
-  );
+  const feedback = neuralRouter.reinforceOutcome(userMessage, actualSkill);
+  if (feedback.updated) {
+    tracer.log(
+      'routes.js',
+      'NeuralRouter.reinforceOutcome',
+      'INFO',
+      `Дообучение роутера: ${feedback.previousSkill} (${(feedback.previousConfidence * 100).toFixed(1)}%) -> ${feedback.actualSkill} (${(feedback.newConfidence * 100).toFixed(1)}%)`
+    );
+  }
 
-  if (!isTestRun) {
+  const batch = neuralRouter.recordConfirmedSuccess(userMessage, actualSkill);
+  if (batch.trained) {
+    tracer.log(
+      'routes.js',
+      'NeuralRouter.trainBatch',
+      'INFO',
+      `Батч-дообучение по подтверждённым успехам: ${batch.batchSize} пример(ов), скилы: ${batch.skills.join(', ')}`
+    );
+  } else if (batch.reason === 'pending') {
+    tracer.log(
+      'routes.js',
+      'NeuralRouter.trainBatch',
+      'INFO',
+      `Накоплено подтверждённых успехов: ${batch.pending}/${batch.threshold}`
+    );
+  }
+
+  if (!isTestRun && (feedback.updated || batch.trained)) {
     try {
       await neuralRouter.save();
     } catch (err) {
-      tracer.log('routes.js', 'NeuralRouter.save', 'ERROR', `Не удалось сохранить веса роутера: ${err.message}`);
+      tracer.log(
+        'routes.js',
+        'NeuralRouter.save',
+        'ERROR',
+        `Не удалось сохранить веса роутера: ${err.message}`
+      );
     }
   }
 }
@@ -121,7 +247,7 @@ ${preview}
 ---
 
 Повтори ответ СТРОГО в виде JSON-массива. БЕЗ markdown (\`\`\`json), БЕЗ текста до и после.
-Только 8 инструментов: readFile, writeFile, createDir, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand.
+Только ${Object.keys(toolsRegistry).join(', ')}.
 Формат: [{"step":1,"tool":"writeFile","arguments":{"filePath":"...","content":"..."},"description":"..."}]
 ${pathRule}
 Имя файла и содержимое бери ДОСЛОВНО из запроса пользователя ниже — не подставляй примеры.
@@ -133,9 +259,10 @@ ${userMessage}
 }
 
 function buildFixPrompt(step, errorMessage, userMessage, prevResults = [], strictDefault = true) {
-  const completedStepsSummary = Array.isArray(prevResults) && prevResults.length > 0
-    ? `Уже выполненные шаги: ${prevResults.map((r) => `step ${r.step} (${r.tool})`).join(', ')}.`
-    : 'Выполненных шагов пока нет.';
+  const completedStepsSummary =
+    Array.isArray(prevResults) && prevResults.length > 0
+      ? `Уже выполненные шаги: ${prevResults.map((r) => `step ${r.step} (${r.tool})`).join(', ')}.`
+      : 'Выполненных шагов пока нет.';
 
   const pathRule = strictDefault
     ? 'Режим strict: пути относительны tests/sandbox/ (без префикса "tests/sandbox/"). Вне песочницы работать нельзя.'
@@ -157,7 +284,7 @@ ${pathRule}
 - Если исходный запрос просит создать файл X с текстом Y — используй ИМЕННО X и Y из запроса, не выдумывай.
 - Если исходный запрос просит создать ПАПКУ — используй инструмент createDir, а не writeFile.
 - Не подставляй "типичные" имена файлов (config.json, test.js, index.js и т.п.), если пользователь их не назвал.
-- Разрешены ТОЛЬКО инструменты: readFile, writeFile, createDir, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand.
+- Разрешены ТОЛЬКО инструменты: ${Object.keys(toolsRegistry).join(', ')}.
 - Не повторяй уже выполненные успешные шаги.
 
 Формат ответа (без markdown, без пояснений):
@@ -197,12 +324,28 @@ async function askModelToFixStep(
     );
     const parsedFix = safeParseJsonPayload(rawFix);
     if (parsedFix && typeof parsedFix === 'object' && !Array.isArray(parsedFix)) {
-      tracer.log('routes.js', 'askModelToFixStep', 'OK', 'Получено исправление от модели', JSON.stringify(parsedFix));
+      tracer.log(
+        'routes.js',
+        'askModelToFixStep',
+        'OK',
+        'Получено исправление от модели',
+        JSON.stringify(parsedFix)
+      );
       return parsedFix;
     }
-    tracer.log('routes.js', 'askModelToFixStep', 'ERROR', 'Не удалось извлечь JSON-объект из ответа коррекции');
+    tracer.log(
+      'routes.js',
+      'askModelToFixStep',
+      'ERROR',
+      'Не удалось извлечь JSON-объект из ответа коррекции'
+    );
   } catch (e) {
-    tracer.log('routes.js', 'askModelToFixStep', 'ERROR', `Ошибка парсинга исправления: ${e.message}`);
+    tracer.log(
+      'routes.js',
+      'askModelToFixStep',
+      'ERROR',
+      `Ошибка парсинга исправления: ${e.message}`
+    );
   } finally {
     gpuMutex.release();
   }
@@ -225,6 +368,9 @@ router.post('/v1/chat/completions', async (req, res) => {
   const abortSignal = clientGuard.signal;
   const promptOptions = { signal: abortSignal, stopOnAbortSignal: true };
 
+  // Инициализируется ниже (initLlamaEngine) перед использованием; null нужен,
+  // чтобы finally/refinePlanSkill не падали, если исключение прилетело раньше.
+  // eslint-disable-next-line no-useless-assignment -- сброс к null обязателен для безопасного finally до инициализации
   let session = null;
   const isTestRun = process.env.RUN_LLM_TESTS === 'true';
   const tracer = new ExecutionTracer(isTestRun ? 'test' : 'chat');
@@ -283,24 +429,25 @@ router.post('/v1/chat/completions', async (req, res) => {
     });
 
     if (!stream) {
-      const prompt = expectedMode === 'chat'
-        ? buildTextOnlyPrompt({
-            currentMode,
-            strictDefault: requestStrict,
-            routingDecision,
-            mindSummary,
-            recentHistoryBlock,
-            userMessage
-          })
-        : buildNonStreamPrompt({
-            currentMode,
-            strictDefault: requestStrict,
-            toolsPrompt,
-            routingDecision,
-            mindSummary,
-            recentHistoryBlock,
-            userMessage
-          });
+      const prompt =
+        expectedMode === 'chat'
+          ? buildTextOnlyPrompt({
+              currentMode,
+              strictDefault: requestStrict,
+              routingDecision,
+              mindSummary,
+              recentHistoryBlock,
+              userMessage
+            })
+          : buildNonStreamPrompt({
+              currentMode,
+              strictDefault: requestStrict,
+              toolsPrompt,
+              routingDecision,
+              mindSummary,
+              recentHistoryBlock,
+              userMessage
+            });
       tracer.setPromptSent(prompt);
 
       const responseText = await session.prompt(prompt, promptOptions);
@@ -309,7 +456,12 @@ router.post('/v1/chat/completions', async (req, res) => {
       if (clientGuard.clientGone) return;
       const cleanResp = responseText.trim();
       tracer.setFinalResponse(cleanResp);
-      tracer.log('routes.js', 'session.prompt (non-stream)', 'OK', `Ответ сформирован (mode=${expectedMode})`);
+      tracer.log(
+        'routes.js',
+        'session.prompt (non-stream)',
+        'OK',
+        `Ответ сформирован (mode=${expectedMode})`
+      );
       await tracer.commitAndSavePdf();
 
       return res.json({
@@ -317,11 +469,13 @@ router.post('/v1/chat/completions', async (req, res) => {
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: 'local-agent-model',
-        choices: [{
-          index: 0,
-          message: { role: 'assistant', content: cleanResp },
-          finish_reason: 'stop'
-        }],
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: cleanResp },
+            finish_reason: 'stop'
+          }
+        ],
         usage: { prompt_tokens: -1, completion_tokens: -1, total_tokens: -1 },
         neural_routing: routingDecision
       });
@@ -357,7 +511,12 @@ router.post('/v1/chat/completions', async (req, res) => {
       // Клиент ушёл — не пишем в мысль, не дообучаем роутер и не шлём [DONE].
       if (clientGuard.clientGone) throw createAbortError();
       tracer.setModelPlan(rawText);
-      tracer.log('routes.js', 'session.prompt (stream, chat-mode)', 'OK', 'Получен текстовый ответ');
+      tracer.log(
+        'routes.js',
+        'session.prompt (stream, chat-mode)',
+        'OK',
+        'Получен текстовый ответ'
+      );
 
       const cleanText = rawText.trim();
 
@@ -371,8 +530,12 @@ router.post('/v1/chat/completions', async (req, res) => {
         );
       }
 
-      await pushRecursiveThought(`Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`, 1, false);
-      await applyRouterFeedback(userMessage, 'chat', tracer, isTestRun);
+      await pushRecursiveThought(
+        `Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`,
+        1,
+        false
+      );
+      await recordConfirmedOutcome(userMessage, 'chat', tracer, isTestRun);
 
       sendSSE({ choices: [{ delta: { content: `\n${cleanText}\n` } }] });
       tracer.setFinalResponse(chatTranscript.trim());
@@ -398,12 +561,22 @@ router.post('/v1/chat/completions', async (req, res) => {
     // Клиент ушёл во время генерации — план не выполняем.
     if (clientGuard.clientGone) throw createAbortError();
     tracer.setModelPlan(modelResponse);
-    tracer.log('routes.js', 'session.prompt (stream)', 'OK', `Получен ответ от модели (mode=${expectedMode})`);
+    tracer.log(
+      'routes.js',
+      'session.prompt (stream)',
+      'OK',
+      `Получен ответ от модели (mode=${expectedMode})`
+    );
 
     let plan = extractActionPlan(modelResponse);
 
     if (plan.length === 0 && expectedMode === 'action') {
-      tracer.log('routes.js', 'ActionRetry', 'RETRY', 'План не распознан, запрашиваем повтор в строгом формате');
+      tracer.log(
+        'routes.js',
+        'ActionRetry',
+        'RETRY',
+        'План не распознан, запрашиваем повтор в строгом формате'
+      );
       const retryPrompt = buildActionRetryPrompt({
         userMessage,
         originalResponse: modelResponse,
@@ -428,12 +601,21 @@ router.post('/v1/chat/completions', async (req, res) => {
       const cleanText = modelResponse.trim();
 
       if (expectedMode !== 'action') {
-        await applyRouterFeedback(userMessage, 'chat', tracer, isTestRun);
+        await recordConfirmedOutcome(userMessage, 'chat', tracer, isTestRun);
       } else {
-        tracer.log('routes.js', 'FeedbackSkipped', 'WARN', 'Action-запрос провалился в текст — роутер не дообучаем');
+        tracer.log(
+          'routes.js',
+          'FeedbackSkipped',
+          'WARN',
+          'Action-запрос провалился в текст — роутер не дообучаем'
+        );
       }
 
-      await pushRecursiveThought(`Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`, 1, false);
+      await pushRecursiveThought(
+        `Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`,
+        1,
+        false
+      );
       sendSSE({ choices: [{ delta: { content: `\n${cleanText}\n` } }] });
       if (clientGuard.clientGone) throw createAbortError();
       tracer.setFinalResponse(chatTranscript.trim());
@@ -443,8 +625,16 @@ router.post('/v1/chat/completions', async (req, res) => {
     }
 
     await pushRecursiveThought(`Запрос: ${userMessage} -> План из ${plan.length} шагов`, 1, false);
-    tracer.log('routes.js', 'PlanParser', 'OK', `План из ${plan.length} шагов`, JSON.stringify(plan, null, 2));
-    sendSSE({ choices: [{ delta: { content: `\nПлан принят (${plan.length} шагов). Выполняем...\n\n` } }] });
+    tracer.log(
+      'routes.js',
+      'PlanParser',
+      'OK',
+      `План из ${plan.length} шагов`,
+      JSON.stringify(plan, null, 2)
+    );
+    sendSSE({
+      choices: [{ delta: { content: `\nПлан принят (${plan.length} шагов). Выполняем...\n\n` } }]
+    });
 
     let currentStepMeta = null;
     const progressCallback = (event) => {
@@ -477,13 +667,28 @@ router.post('/v1/chat/completions', async (req, res) => {
           `${event.description} [Путь: ${target}]`,
           JSON.stringify(argsObj, null, 2)
         );
-        sendSSE({ choices: [{ delta: { content: `▶ Шаг ${event.step}: ${event.description} [\`${currentStepMeta.tool}\`]\n` } }] });
+        sendSSE({
+          choices: [
+            {
+              delta: {
+                content: `▶ Шаг ${event.step}: ${event.description} [\`${currentStepMeta.tool}\`]\n`
+              }
+            }
+          ]
+        });
       } else if (event.type === 'step_result') {
         const target = currentStepMeta?.target || 'не указан';
         const toolName = event.tool || currentStepMeta?.tool;
         const argsObj = currentStepMeta?.args || null;
         if (event.success) {
-          tracer.addAction(event.step, toolName, target, 'OK', event.result || 'Выполнено', argsObj);
+          tracer.addAction(
+            event.step,
+            toolName,
+            target,
+            'OK',
+            event.result || 'Выполнено',
+            argsObj
+          );
           tracer.log('executor.js', `Шаг ${event.step}`, 'OK', event.result || 'Успешно');
           const formatted = formatStepResultForChat(toolName, event.result);
           sendSSE({ choices: [{ delta: { content: formatted } }] });
@@ -516,25 +721,48 @@ router.post('/v1/chat/completions', async (req, res) => {
           true,
           2,
           requestStrict,
-          { signal: abortSignal }
+          {
+            signal: abortSignal,
+            // Блок 6.3: подтверждение опасно только в свободном режиме —
+            // в песочнице файлы изолированы, спрашивать не нужно.
+            confirmStep: requestStrict
+              ? undefined
+              : (step) =>
+                  confirmGate.request(
+                    {
+                      tool: step.tool,
+                      arguments: step.arguments,
+                      description: step.description
+                    },
+                    (id, payload) => {
+                      clientGuard.send(
+                        `data: ${JSON.stringify({ type: 'confirmation_request', id, ...payload })}\n\n`
+                      );
+                    },
+                    abortSignal
+                  )
+          }
         ),
         clientGuard
       );
     } finally {
       // executePlan получил сигнал обрыва и вернул report.aborted (сам он не бросает):
       // превращаем это в AbortError, чтобы внешний catch отработал как при обрыве.
+      // eslint-disable-next-line no-unsafe-finally -- throw нужен намеренно: пробрасываем abort из finally во внешний catch
       if (executionReport?.aborted || clientGuard.clientGone) throw createAbortError();
     }
 
     if (executionReport.success) {
-      const actualSkill = inferActualSkillFromPlan(plan);
-      await applyRouterFeedback(userMessage, actualSkill, tracer, isTestRun);
+      const actualSkill = refinePlanSkill(plan);
+      await recordConfirmedOutcome(userMessage, actualSkill, tracer, isTestRun);
       tracer.log('routes.js', 'ExecutionComplete', 'OK', 'Все шаги выполнены');
       sendSSE({ choices: [{ delta: { content: '\n✨ Готово!\n' } }] });
     } else {
       await pushRecursiveThought(`Провал: ${executionReport.error}`, 1, true);
       tracer.log('routes.js', 'ExecutionComplete', 'ERROR', executionReport.error);
-      sendSSE({ choices: [{ delta: { content: `\n❌ Ошибка выполнения: ${executionReport.error}\n` } }] });
+      sendSSE({
+        choices: [{ delta: { content: `\n❌ Ошибка выполнения: ${executionReport.error}\n` } }]
+      });
     }
 
     tracer.setFinalResponse(chatTranscript.trim());
@@ -550,7 +778,12 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     if (aborted) {
       console.log('⏹️ Генерация прервана: клиент разорвал соединение');
-      tracer.log('routes.js', 'ClientAborted', 'WARN', error?.message || 'Клиент разорвал соединение');
+      tracer.log(
+        'routes.js',
+        'ClientAborted',
+        'WARN',
+        error?.message || 'Клиент разорвал соединение'
+      );
     } else {
       console.error('Ошибка:', error);
       tracer.log('routes.js', 'GlobalCatch', 'ERROR', error.message);
@@ -573,15 +806,22 @@ router.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
+router.post('/v1/confirm', (req, res) => {
+  const { id, approved } = req.body || {};
+  const handled = confirmGate.settle(id, approved === true);
+  res.json({ success: handled, id: id ?? null, approved: approved === true });
+});
+
 router.post('/v1/session/reset', async (req, res) => {
   await gpuMutex.acquire();
   try {
     const { strictSandbox } = req.body || {};
     // Без глобальной мутации: режим этого вызова определяем локально.
-    const currentMode =
-      (typeof strictSandbox === 'boolean' ? strictSandbox : DEFAULT_STRICT_SANDBOX)
-        ? 'strict'
-        : 'free';
+    const currentMode = (
+      typeof strictSandbox === 'boolean' ? strictSandbox : DEFAULT_STRICT_SANDBOX
+    )
+      ? 'strict'
+      : 'free';
     neuralRouter.resetMemory();
 
     await initMind();

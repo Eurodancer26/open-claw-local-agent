@@ -26,16 +26,20 @@ export default [
     },
     rules: {
       'no-empty': ['error', { allowEmptyCatch: true }],
-      'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
-      // Оставлено на уровне warn на момент внедрения линтера: существующий код
-      // осознанно использует эти приёмы (escape-символы в regex, sanitize с
-      // control-regex, throw в finally для проброса abort). Понижено до warn,
-      // чтобы не менять поведение приложения молча. TODO: разобрать и включить.
-      'no-useless-assignment': 'warn',
-      'no-unsafe-finally': 'warn',
-      'no-useless-escape': 'warn',
-      'no-control-regex': 'warn',
-      'preserve-caught-error': 'warn'
+      // Плейсхолдеры (`_` или `_name`) допустимы: так помечают намеренно
+      // неиспользуемые аргументы/binding'и (например, `catch (_)`).
+      'no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }
+      ],
+      // Правила ниже разобраны после внедрения линтера (блок 5, follow-up).
+      // В редких намеренных местах стоит точечный eslint-disable-next-line с
+      // пояснением; глобальных понижений больше нет.
+      'no-useless-assignment': 'error',
+      'no-unsafe-finally': 'error',
+      'no-useless-escape': 'error',
+      'no-control-regex': 'error',
+      'preserve-caught-error': 'error'
     }
   },
   {

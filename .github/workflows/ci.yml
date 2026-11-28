@@ -21,6 +21,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      # format:check намеренно не в CI: требует единоразового `npm run format`,
-      # который переформатирует ~36 файлов (отдельное решение).
+      - run: npm run format:check
       - run: npm test

@@ -47,7 +47,9 @@ async function pruneOldReflections(maxFiles = MAX_REFLECTION_FILES) {
 
     const toDelete = mdFiles.slice(0, mdFiles.length - maxFiles);
     await Promise.all(
-      toDelete.map((file) => fs.rm(path.join(REFLECTIONS_DIR, file), { force: true }).catch(() => {}))
+      toDelete.map((file) =>
+        fs.rm(path.join(REFLECTIONS_DIR, file), { force: true }).catch(() => {})
+      )
     );
   } catch (err) {
     console.error('Ошибка очистки старых рефлексий:', err);
@@ -87,9 +89,14 @@ export async function updateMindState(updater) {
 // Убираем только управляющие символы. Пунктуация (включая { } " : / , ;)
 // сохраняется — иначе JSON-структура в памяти превращается в кашу.
 function sanitizeForFile(text) {
-  return String(text)
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-    .trim();
+  return (
+    String(text)
+      // Намеренно вычищаем управляющие символы (включая \x00-\x1F и DEL) из
+      // текста перед записью в state.json — правило ниже срабатывает осознанно.
+      // eslint-disable-next-line no-control-regex -- sanitize: вырезаем управляющие символы намеренно
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .trim()
+  );
 }
 
 // Однострочный короткий preview без переносов и длинных «хвостов» JSON.
@@ -112,9 +119,18 @@ function looksLikeBrokenJsonPlan(text) {
   let inStr = false;
   let esc = false;
   for (const ch of s) {
-    if (esc) { esc = false; continue; }
-    if (ch === '\\') { esc = true; continue; }
-    if (ch === '"') { inStr = !inStr; continue; }
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (ch === '\\') {
+      esc = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
     if (inStr) continue;
     if (ch === '{' || ch === '[') depth++;
     else if (ch === '}' || ch === ']') depth--;
@@ -135,14 +151,11 @@ function sanitizePreviewForModel(preview) {
   );
 
   // Заменяем одиночные имена файлов с расширением на [файл]
-  s = s.replace(
-    /\b[\w-]+\.(?:json|txt|js|ts|md|xml|css|html|log|csv|yml|yaml|ini)\b/gi,
-    '[файл]'
-  );
+  s = s.replace(/\b[\w-]+\.(?:json|txt|js|ts|md|xml|css|html|log|csv|yml|yaml|ini)\b/gi, '[файл]');
 
   // Заменяем содержимое в двойных кавычках, если оно длинное или содержит пути
   s = s.replace(/"([^"]{4,})"/g, (match, inner) => {
-    if (inner.length > 30 || /[\/\\]/.test(inner)) return '"[содержимое]"';
+    if (inner.length > 30 || /[/\\]/.test(inner)) return '"[содержимое]"';
     return match;
   });
 
@@ -152,9 +165,7 @@ function sanitizePreviewForModel(preview) {
 // Разбирает строку вида «Запрос: X -> Ответ: Y» или «Запрос: X -> План из N шагов».
 function splitRequestAnswer(raw) {
   const s = String(raw || '');
-  const m = s.match(
-    /^Запрос:\s*([\s\S]*?)\s*->\s*(?:План из\s+\d+\s+шагов|Ответ:\s*([\s\S]*))$/i
-  );
+  const m = s.match(/^Запрос:\s*([\s\S]*?)\s*->\s*(?:План из\s+\d+\s+шагов|Ответ:\s*([\s\S]*))$/i);
   if (m) {
     return { request: (m[1] || '').trim(), answer: (m[2] || '').trim() };
   }
@@ -196,10 +207,10 @@ export async function pushRecursiveThought(thoughtText, depth = 1, isError = fal
     const state = await initMind();
 
     const dedupedStack = (state.thoughtStack || []).filter((t) => t && t.preview !== preview);
-    const newStack = [
-      { depth, file: fileName, preview, isError },
-      ...dedupedStack
-    ].slice(0, MAX_THOUGHT_STACK);
+    const newStack = [{ depth, file: fileName, preview, isError }, ...dedupedStack].slice(
+      0,
+      MAX_THOUGHT_STACK
+    );
 
     await updateMindState({ thoughtStack: newStack });
     await pruneOldReflections(MAX_REFLECTION_FILES);
@@ -245,9 +256,7 @@ export async function getMindContextSummary() {
     for (const raw of stack) {
       const c = classifyEntry(raw);
       if (!c) continue;
-      const key = c.isError
-        ? `err:${c.preview.slice(0, 80)}`
-        : `ok:${c.preview.slice(0, 80)}`;
+      const key = c.isError ? `err:${c.preview.slice(0, 80)}` : `ok:${c.preview.slice(0, 80)}`;
       if (seen.has(key)) continue;
       seen.add(key);
       if (c.isError) {
@@ -274,8 +283,8 @@ export async function getMindContextSummary() {
     lines.push('');
     lines.push(
       'ВАЖНО: НЕ копируй пути, имена файлов или содержимое из памяти или прошлых ответов. ' +
-      'Используй РОВНО те значения, которые указал пользователь в ТЕКУЩЕМ запросе. ' +
-      'Если память говорит «успешно создал файл [файл]» — это НЕ значит, что нужно снова создавать его.'
+        'Используй РОВНО те значения, которые указал пользователь в ТЕКУЩЕМ запросе. ' +
+        'Если память говорит «успешно создал файл [файл]» — это НЕ значит, что нужно снова создавать его.'
     );
 
     let summary = lines.join('\n');

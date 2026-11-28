@@ -39,12 +39,28 @@ describe('Конструкт АИ — Тесты исполнителя (Executo
       assert.equal(executionReport.success, true, 'План должен выполниться успешно');
       assert.ok(Array.isArray(executionReport.results), 'Поле results должно быть массивом');
       assert.equal(executionReport.results.length, 3, 'Должно быть выполнено ровно 3 шага');
-      assert.equal(executionReport.results[0].success, true, 'Шаг 1 (writeFile) должен завершиться успехом');
-      assert.equal(executionReport.results[1].output, 'Payload from step 1', 'Содержимое первого файла должно совпадать');
-      assert.equal(executionReport.results[2].success, true, 'Шаг 3 (writeFile с плейсхолдером) должен завершиться успехом');
+      assert.equal(
+        executionReport.results[0].success,
+        true,
+        'Шаг 1 (writeFile) должен завершиться успехом'
+      );
+      assert.equal(
+        executionReport.results[1].output,
+        'Payload from step 1',
+        'Содержимое первого файла должно совпадать'
+      );
+      assert.equal(
+        executionReport.results[2].success,
+        true,
+        'Шаг 3 (writeFile с плейсхолдером) должен завершиться успехом'
+      );
 
       const copiedContent = await fs.readFile(path.resolve(secondFilePath), 'utf8');
-      assert.equal(copiedContent, 'Copied: Payload from step 1', 'Плейсхолдер {{step2.output}} должен подставиться корректно');
+      assert.equal(
+        copiedContent,
+        'Copied: Payload from step 1',
+        'Плейсхолдер {{step2.output}} должен подставиться корректно'
+      );
 
       console.log('   ✔ Тест исполнителя и проброса результатов успешно пройден!');
     } finally {

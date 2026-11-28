@@ -24,7 +24,7 @@ describe('Конструкт АИ — Единый полный комплекс
   before(async () => {
     console.log('🚀 Запуск общего тестового сервера...');
     await fs.mkdir(path.resolve('tests/sandbox'), { recursive: true });
-    
+
     serverProcess = spawn(process.execPath, ['src/server.js'], {
       stdio: 'inherit',
       env: { ...process.env, PORT: '3000' }
@@ -49,10 +49,15 @@ describe('Конструкт АИ — Единый полный комплекс
     const readAttempt = await toolsRegistry.readFile.execute({ filePath: '../../package.json' });
     assert.equal(readAttempt.success, false);
 
-    const prefixBypass = await toolsRegistry.readFile.execute({ filePath: '../other-project/package.json' });
+    const prefixBypass = await toolsRegistry.readFile.execute({
+      filePath: '../other-project/package.json'
+    });
     assert.equal(prefixBypass.success, false);
 
-    const writeAttempt = await toolsRegistry.writeFile.execute({ filePath: '../../hack.txt', content: 'test' });
+    const writeAttempt = await toolsRegistry.writeFile.execute({
+      filePath: '../../hack.txt',
+      content: 'test'
+    });
     assert.equal(writeAttempt.success, false);
 
     const cmdAttempt = await toolsRegistry.runCommand.execute({ commandId: 'rm -rf /' });
@@ -63,7 +68,10 @@ describe('Конструкт АИ — Единый полный комплекс
     const { toolsRegistry } = await import('../src/tools/registry.js');
     const testFile = 'tests/sandbox/deep/nested/dir/base-check.txt';
 
-    const writeRes = await toolsRegistry.writeFile.execute({ filePath: testFile, content: 'Hello deep tests!' });
+    const writeRes = await toolsRegistry.writeFile.execute({
+      filePath: testFile,
+      content: 'Hello deep tests!'
+    });
     assert.equal(writeRes.success, true, `Ошибка записи во вложенную папку: ${writeRes.error}`);
 
     const readRes = await toolsRegistry.readFile.execute({ filePath: testFile });
@@ -78,7 +86,7 @@ describe('Конструкт АИ — Единый полный комплекс
     const targetFile = 'tests/sandbox/to-delete.txt';
 
     await toolsRegistry.writeFile.execute({ filePath: targetFile, content: 'Delete me' });
-    
+
     const deleteRes = await toolsRegistry.deleteFile.execute({ filePath: targetFile });
     assert.equal(deleteRes.success, true, `Ошибка удаления: ${deleteRes.error}`);
 
@@ -97,7 +105,7 @@ describe('Конструкт АИ — Единый полный комплекс
 
   it('5. Проверка безопасных команд из белого списка (node-version, dir-list)', async () => {
     const { toolsRegistry } = await import('../src/tools/registry.js');
-    
+
     const cmdRes1 = await toolsRegistry.runCommand.execute({ commandId: 'node-version' });
     assert.equal(cmdRes1.success, true);
     assert.match(cmdRes1.stdout.trim(), /^v\d+\.\d+\.\d+/);
@@ -109,98 +117,139 @@ describe('Конструкт АИ — Единый полный комплекс
 
   // --- БЛОК 2: LLM, СТРИМИНГ И АГЕНТИЧНЫЙ ЦИКЛ (при RUN_LLM_TESTS=true) ---
 
-  it('6. Сквозной HTTP-тест не-стриминга (stream: false)', { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 }, async () => {
-    const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: 'Напиши одно слово: тест' }],
-        stream: false
-      })
-    });
-    assert.equal(res.status, 200);
-    const data = await res.json();
-    assert.ok(data.choices?.[0]?.message?.content);
-  });
+  it(
+    '6. Сквозной HTTP-тест не-стриминга (stream: false)',
+    {
+      skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false,
+      timeout: 300_000
+    },
+    async () => {
+      const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Напиши одно слово: тест' }],
+          stream: false
+        })
+      });
+      assert.equal(res.status, 200);
+      const data = await res.json();
+      assert.ok(data.choices?.[0]?.message?.content);
+    }
+  );
 
-  it('7. Сквозной тест SSE-стриминга (stream: true)', { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 }, async () => {
-    const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: 'Напиши слово: привет' }],
-        stream: true
-      })
-    });
-    assert.equal(res.status, 200);
-    assert.match(res.headers.get('content-type'), /text\/event-stream/);
+  it(
+    '7. Сквозной тест SSE-стриминга (stream: true)',
+    {
+      skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false,
+      timeout: 300_000
+    },
+    async () => {
+      const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Напиши слово: привет' }],
+          stream: true
+        })
+      });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type'), /text\/event-stream/);
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let done = false;
-    let hasDoneMarker = false;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let done = false;
+      let hasDoneMarker = false;
 
-    while (!done) {
-      const { value, done: readerDone } = await reader.read();
-      if (readerDone) break;
-      const chunk = decoder.decode(value, { stream: true });
-      if (chunk.includes('[DONE]')) {
-        hasDoneMarker = true;
-        done = true;
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        if (readerDone) break;
+        const chunk = decoder.decode(value, { stream: true });
+        if (chunk.includes('[DONE]')) {
+          hasDoneMarker = true;
+          done = true;
+        }
       }
+      assert.equal(hasDoneMarker, true);
     }
-    assert.equal(hasDoneMarker, true);
-  });
+  );
 
-  it('8. Сквозной тест агентичного цикла Plan & Execute (создание и чтение файла)', { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 }, async () => {
-    const targetFile = 'tests/sandbox/unified-agent-test.txt';
-    await fs.rm(path.resolve(targetFile), { force: true }).catch(() => {});
+  it(
+    '8. Сквозной тест агентичного цикла Plan & Execute (создание и чтение файла)',
+    {
+      skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false,
+      timeout: 300_000
+    },
+    async () => {
+      const targetFile = 'tests/sandbox/unified-agent-test.txt';
+      await fs.rm(path.resolve(targetFile), { force: true }).catch(() => {});
 
-    const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: `Создай файл "${targetFile}" с текстом "Единый тест пройден!" и прочитай его.` }],
-        stream: true
-      })
-    });
+      const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            {
+              role: 'user',
+              content: `Создай файл "${targetFile}" с текстом "Единый тест пройден!" и прочитай его.`
+            }
+          ],
+          stream: true
+        })
+      });
 
-    assert.equal(res.status, 200);
+      assert.equal(res.status, 200);
 
-    const reader = res.body.getReader();
-    while (true) {
-      const { done } = await reader.read();
-      if (done) break;
+      const reader = res.body.getReader();
+      while (true) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+
+      const content = await fs.readFile(path.resolve(targetFile), 'utf8');
+      assert.equal(content, 'Единый тест пройден!');
+      await fs.rm(path.resolve(targetFile), { force: true });
     }
+  );
 
-    const content = await fs.readFile(path.resolve(targetFile), 'utf8');
-    assert.equal(content, 'Единый тест пройден!');
-    await fs.rm(path.resolve(targetFile), { force: true });
-  });
+  it(
+    '9. Сквозной тест самокоррекции агента при ошибке пути',
+    {
+      skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false,
+      timeout: 300_000
+    },
+    async () => {
+      const targetFile = 'tests/sandbox/unified-correction.txt';
+      await fs.rm(path.resolve(targetFile), { force: true }).catch(() => {});
 
-  it('9. Сквозной тест самокоррекции агента при ошибке пути', { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 }, async () => {
-    const targetFile = 'tests/sandbox/unified-correction.txt';
-    await fs.rm(path.resolve(targetFile), { force: true }).catch(() => {});
+      const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            {
+              role: 'user',
+              content: `Попытайся прочитать файл "${targetFile}". Если его нет, создай его с текстом "Самокоррекция в едином тесте работает!" и прочитай.`
+            }
+          ],
+          stream: true
+        })
+      });
 
-    const res = await fetch(`${SERVER_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: `Попытайся прочитать файл "${targetFile}". Если его нет, создай его с текстом "Самокоррекция в едином тесте работает!" и прочитай.` }],
-        stream: true
-      })
-    });
+      assert.equal(res.status, 200);
 
-    assert.equal(res.status, 200);
+      const reader = res.body.getReader();
+      while (true) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
 
-    const reader = res.body.getReader();
-    while (true) {
-      const { done } = await reader.read();
-      if (done) break;
+      const fileExists = await fs
+        .stat(path.resolve(targetFile))
+        .then(() => true)
+        .catch(() => false);
+      assert.equal(fileExists, true);
+      await fs.rm(path.resolve(targetFile), { force: true });
     }
-
-    const fileExists = await fs.stat(path.resolve(targetFile)).then(() => true).catch(() => false);
-    assert.equal(fileExists, true);
-    await fs.rm(path.resolve(targetFile), { force: true });
-  });
+  );
 });

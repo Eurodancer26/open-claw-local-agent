@@ -1,5 +1,5 @@
 // src/core/executor.js
-import { toolsRegistry } from '../tools/registry.js';
+import { toolsRegistry, DANGEROUS_TOOL_NAMES } from '../tools/registry.js';
 import { getStrictCommandPolicy, listStrictAllowedCommands } from '../tools/safeCommands.js';
 import { MAX_PLAN_STEPS } from './limits.js';
 
@@ -7,6 +7,18 @@ import { MAX_PLAN_STEPS } from './limits.js';
 // чтобы не было скрытого рассинхрона с planParser.js (было 64 vs 128).
 export { MAX_PLAN_STEPS };
 const MAX_STEPS = MAX_PLAN_STEPS;
+
+// Блок 6.3: опасные инструменты, требующие подтверждения пользователя
+// в свободном режиме (в песочнице файлы изолированы — подтверждение не нужно).
+export const DANGEROUS_TOOLS = new Set(['deleteFile']);
+
+/**
+ * Опасен ли инструмент: ядро (DANGEROUS_TOOLS) или плагин (DANGEROUS_TOOL_NAMES).
+ * @param {string} name
+ */
+export function isDangerousTool(name) {
+  return DANGEROUS_TOOLS.has(name) || DANGEROUS_TOOL_NAMES.has(name);
+}
 
 function isPlainObject(v) {
   return v && typeof v === 'object' && !Array.isArray(v);
@@ -27,7 +39,10 @@ function validateArguments(tool, args, strict = undefined) {
 
     case 'writeFile':
       if (typeof args.filePath !== 'string' || !args.filePath.trim()) {
-        return { valid: false, error: 'Инструмент "writeFile" требует непустой arguments.filePath' };
+        return {
+          valid: false,
+          error: 'Инструмент "writeFile" требует непустой arguments.filePath'
+        };
       }
       if (/[\\/]\s*$/.test(args.filePath)) {
         return {
@@ -36,7 +51,10 @@ function validateArguments(tool, args, strict = undefined) {
         };
       }
       if (args.content === undefined) {
-        return { valid: false, error: 'Инструмент "writeFile" требует arguments.content (может быть пустой строкой)' };
+        return {
+          valid: false,
+          error: 'Инструмент "writeFile" требует arguments.content (может быть пустой строкой)'
+        };
       }
       break;
 
@@ -52,6 +70,15 @@ function validateArguments(tool, args, strict = undefined) {
       }
       break;
 
+    case 'searchInFiles':
+      if (typeof args.query !== 'string' || !args.query.trim()) {
+        return {
+          valid: false,
+          error: 'Инструмент "searchInFiles" требует непустой arguments.query'
+        };
+      }
+      break;
+
     case 'listDir':
     case 'analyzeProject':
       if (typeof args.dirPath !== 'string' || !args.dirPath.trim()) {
@@ -61,10 +88,16 @@ function validateArguments(tool, args, strict = undefined) {
 
     case 'generateUnitTest':
       if (typeof args.sourcePath !== 'string' || !args.sourcePath.trim()) {
-        return { valid: false, error: 'Инструмент "generateUnitTest" требует arguments.sourcePath' };
+        return {
+          valid: false,
+          error: 'Инструмент "generateUnitTest" требует arguments.sourcePath'
+        };
       }
       if (typeof args.outputPath !== 'string' || !args.outputPath.trim()) {
-        return { valid: false, error: 'Инструмент "generateUnitTest" требует arguments.outputPath' };
+        return {
+          valid: false,
+          error: 'Инструмент "generateUnitTest" требует arguments.outputPath'
+        };
       }
       break;
 
@@ -76,7 +109,10 @@ function validateArguments(tool, args, strict = undefined) {
             ? args.command
             : null;
       if (!commandId) {
-        return { valid: false, error: 'Инструмент "runCommand" требует arguments.commandId (или command)' };
+        return {
+          valid: false,
+          error: 'Инструмент "runCommand" требует arguments.commandId (или command)'
+        };
       }
       // Ранний отказ до запуска процесса: в strict команды, читающие весь
       // репозиторий, запрещены (режим приходит явным параметром).
@@ -115,36 +151,55 @@ function normalizeStep(rawStep, index) {
   // Совместимость с «плоским» форматом:
   // {"tool":"writeFile","filePath":"...","content":"..."}
   if (tool === 'writeFile') {
-    if (args.filePath === undefined && typeof rawStep.filePath === 'string') args.filePath = rawStep.filePath;
-    if (args.filePath === undefined && typeof rawStep.path === 'string') args.filePath = rawStep.path;
+    if (args.filePath === undefined && typeof rawStep.filePath === 'string')
+      args.filePath = rawStep.filePath;
+    if (args.filePath === undefined && typeof rawStep.path === 'string')
+      args.filePath = rawStep.path;
     if (args.content === undefined && rawStep.content !== undefined) args.content = rawStep.content;
   } else if (tool === 'createDir') {
-    if (args.dirPath === undefined && typeof rawStep.dirPath === 'string') args.dirPath = rawStep.dirPath;
+    if (args.dirPath === undefined && typeof rawStep.dirPath === 'string')
+      args.dirPath = rawStep.dirPath;
     if (args.dirPath === undefined && typeof rawStep.path === 'string') args.dirPath = rawStep.path;
   } else if (tool === 'readFile' || tool === 'deleteFile') {
-    if (args.filePath === undefined && typeof rawStep.filePath === 'string') args.filePath = rawStep.filePath;
-    if (args.filePath === undefined && typeof rawStep.path === 'string') args.filePath = rawStep.path;
+    if (args.filePath === undefined && typeof rawStep.filePath === 'string')
+      args.filePath = rawStep.filePath;
+    if (args.filePath === undefined && typeof rawStep.path === 'string')
+      args.filePath = rawStep.path;
   } else if (tool === 'listDir' || tool === 'analyzeProject') {
-    if (args.dirPath === undefined && typeof rawStep.dirPath === 'string') args.dirPath = rawStep.dirPath;
+    if (args.dirPath === undefined && typeof rawStep.dirPath === 'string')
+      args.dirPath = rawStep.dirPath;
     if (args.dirPath === undefined && typeof rawStep.path === 'string') args.dirPath = rawStep.path;
   } else if (tool === 'generateUnitTest') {
-    if (args.sourcePath === undefined && typeof rawStep.sourcePath === 'string') args.sourcePath = rawStep.sourcePath;
-    if (args.outputPath === undefined && typeof rawStep.outputPath === 'string') args.outputPath = rawStep.outputPath;
-    if (args.outputPath === undefined && typeof rawStep.path === 'string') args.outputPath = rawStep.path;
+    if (args.sourcePath === undefined && typeof rawStep.sourcePath === 'string')
+      args.sourcePath = rawStep.sourcePath;
+    if (args.outputPath === undefined && typeof rawStep.outputPath === 'string')
+      args.outputPath = rawStep.outputPath;
+    if (args.outputPath === undefined && typeof rawStep.path === 'string')
+      args.outputPath = rawStep.path;
   } else if (tool === 'runCommand') {
-    if (args.commandId === undefined && typeof rawStep.commandId === 'string') args.commandId = rawStep.commandId;
-    if (args.command === undefined && typeof rawStep.command === 'string') args.command = rawStep.command;
+    if (args.commandId === undefined && typeof rawStep.commandId === 'string')
+      args.commandId = rawStep.commandId;
+    if (args.command === undefined && typeof rawStep.command === 'string')
+      args.command = rawStep.command;
+  } else if (tool === 'searchInFiles') {
+    if (args.query === undefined && typeof rawStep.query === 'string') args.query = rawStep.query;
+    if (args.query === undefined && typeof rawStep.pattern === 'string')
+      args.query = rawStep.pattern;
+    if (args.dirPath === undefined && typeof rawStep.dirPath === 'string')
+      args.dirPath = rawStep.dirPath;
+    if (args.dirPath === undefined && typeof rawStep.path === 'string') args.dirPath = rawStep.path;
   }
 
   // Мягкое дефолтное значение для директорий (dirPath = '.')
-  if ((tool === 'listDir' || tool === 'analyzeProject') && args.dirPath === undefined) {
+  if (
+    (tool === 'listDir' || tool === 'analyzeProject' || tool === 'searchInFiles') &&
+    args.dirPath === undefined
+  ) {
     args.dirPath = '.';
   }
 
   const stepNumber =
-    typeof rawStep.step === 'number' && Number.isFinite(rawStep.step)
-      ? rawStep.step
-      : index + 1;
+    typeof rawStep.step === 'number' && Number.isFinite(rawStep.step) ? rawStep.step : index + 1;
 
   const description =
     typeof rawStep.description === 'string' && rawStep.description.trim().length > 0
@@ -179,12 +234,20 @@ function formatToolOutput(toolName, result) {
       return result.message;
     }
     if (typeof result.dirPath === 'string') {
-      return result.created ? `Создана директория ${result.dirPath}` : `Директория уже существует: ${result.dirPath}`;
+      return result.created
+        ? `Создана директория ${result.dirPath}`
+        : `Директория уже существует: ${result.dirPath}`;
     }
   }
 
   if (toolName === 'deleteFile' && typeof result.filePath === 'string') {
     return `Удалён ${result.filePath}`;
+  }
+
+  if (toolName === 'searchInFiles' && Array.isArray(result.results)) {
+    if (result.results.length === 0) return result.message || 'Совпадений не найдено';
+    const body = result.results.map((r) => `${r.file}:${r.line}: ${r.text}`).join('\n');
+    return `${result.message || 'Найдено:'}\n${body}`;
   }
 
   if (typeof result.message === 'string' && result.message.trim().length > 0) {
@@ -200,7 +263,8 @@ function formatToolOutput(toolName, result) {
 
 // {{step1.output}} / {{step1}} / {{step 1.output}} / {{step1.result}} /
 // {{step1.content}} / {{step1.stdout}} — все варианты, которые модели пишут.
-const STEP_REF_REGEX = /\{\{\s*(?:step[\s._-]*)?(\d+)(?:\.(?:output|result|content|stdout))?\s*\}\}/gi;
+const STEP_REF_REGEX =
+  /\{\{\s*(?:step[\s._-]*)?(\d+)(?:\.(?:output|result|content|stdout))?\s*\}\}/gi;
 
 function interpolateStepValue(value, resultsByStep, lastReadOutput = '') {
   if (typeof value === 'string') {
@@ -370,7 +434,11 @@ export async function executePlan(
         if (!validation.valid) {
           const argErr = validation.error;
 
-          if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
+          if (
+            allowSelfCorrection &&
+            attempts < maxCorrectionsPerStep &&
+            typeof fixStepCallback === 'function'
+          ) {
             safeProgress(onProgress, {
               type: 'step_result',
               step: step.step,
@@ -425,6 +493,23 @@ export async function executePlan(
           description: wasCorrected ? `${step.description} [исправлено]` : step.description
         });
 
+        // Блок 6.3/6.5: опасные действия в свободном режиме требуют подтверждения.
+        if (typeof options.confirmStep === 'function' && isDangerousTool(step.tool)) {
+          const verdict = await options.confirmStep(step);
+          if (!verdict || verdict.allowed !== true) {
+            const denyMsg =
+              (verdict && verdict.error) || `Действие "${step.tool}" не подтверждено пользователем`;
+            safeProgress(onProgress, {
+              type: 'step_result',
+              step: step.step,
+              tool: step.tool,
+              success: false,
+              error: denyMsg
+            });
+            return { success: false, error: denyMsg, aborted: false, results };
+          }
+        }
+
         const toolDef = toolsRegistry[step.tool];
         if (!toolDef || typeof toolDef.execute !== 'function') {
           const unknownToolErr = `Неизвестный или недоступный инструмент: "${step.tool}"`;
@@ -436,7 +521,11 @@ export async function executePlan(
             error: unknownToolErr
           });
 
-          if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
+          if (
+            allowSelfCorrection &&
+            attempts < maxCorrectionsPerStep &&
+            typeof fixStepCallback === 'function'
+          ) {
             attempts += 1;
             const fixedRaw = await fixStepCallback(step, unknownToolErr, session, results);
             const normalizedFixed = normalizeStep(fixedRaw, i);
@@ -453,7 +542,8 @@ export async function executePlan(
           const execResult = await toolDef.execute(step.arguments, toolOptions);
 
           if (execResult && execResult.success === false) {
-            const toolErr = execResult.error || execResult.message || `Ошибка выполнения "${step.tool}"`;
+            const toolErr =
+              execResult.error || execResult.message || `Ошибка выполнения "${step.tool}"`;
 
             // Прерывание — не ошибка инструмента: самокоррекция запрещена.
             if (execResult.aborted || executionController.signal.aborted) {
@@ -467,7 +557,11 @@ export async function executePlan(
               return { success: false, aborted: true, error: toolErr, results };
             }
 
-            if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
+            if (
+              allowSelfCorrection &&
+              attempts < maxCorrectionsPerStep &&
+              typeof fixStepCallback === 'function'
+            ) {
               safeProgress(onProgress, {
                 type: 'step_result',
                 step: step.step,
@@ -529,7 +623,11 @@ export async function executePlan(
         } catch (err) {
           const caughtErr = err?.message || String(err);
 
-          if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
+          if (
+            allowSelfCorrection &&
+            attempts < maxCorrectionsPerStep &&
+            typeof fixStepCallback === 'function'
+          ) {
             safeProgress(onProgress, {
               type: 'step_result',
               step: step.step,

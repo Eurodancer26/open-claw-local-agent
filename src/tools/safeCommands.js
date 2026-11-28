@@ -57,13 +57,15 @@ export const SAFE_COMMANDS = {
     executable: 'git',
     args: ['status', '--short'],
     strictAllowed: false,
-    strictDenyReason: 'git status показывает состояние всего репозитория (включая файлы вне tests/sandbox/).'
+    strictDenyReason:
+      'git status показывает состояние всего репозитория (включая файлы вне tests/sandbox/).'
   },
   'git-diff': {
     executable: 'git',
     args: ['diff', '--stat'],
     strictAllowed: false,
-    strictDenyReason: 'git diff показывает изменения по всему репозиторию (включая файлы вне tests/sandbox/).'
+    strictDenyReason:
+      'git diff показывает изменения по всему репозиторию (включая файлы вне tests/sandbox/).'
   }
 };
 

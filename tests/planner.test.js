@@ -6,7 +6,13 @@ import { getToolsSystemPrompt } from '../src/tools/registry.js';
 describe('Конструкт АИ — Тесты планировщика (Planner)', () => {
   it(
     'Планнер должен формировать валидный JSON-план по задаче пользователя',
-    { skip: process.env.RUN_LLM_TESTS !== 'true' ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 },
+    {
+      skip:
+        process.env.RUN_LLM_TESTS !== 'true'
+          ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start'
+          : false,
+      timeout: 300_000
+    },
     async () => {
       const session = await initLlamaEngine();
 

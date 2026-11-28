@@ -7,8 +7,8 @@ import { config } from '../config/index.js';
 // иначе модель видит предыдущие реплики дважды: из сессии и из блока промпта.
 export function applySessionHistoryPolicy(session, { created = false, stateless = true } = {}) {
   if (!session) return false;
-  if (created) return false;     // сессия только что создана — истории в ней ещё нет
-  if (!stateless) return false;  // явный отказ: сессия сама хранит историю
+  if (created) return false; // сессия только что создана — истории в ней ещё нет
+  if (!stateless) return false; // явный отказ: сессия сама хранит историю
   if (typeof session.resetChatHistory === 'function') {
     session.resetChatHistory();
     return true;

@@ -15,7 +15,8 @@ const MIN_CHARS_PER_MESSAGE = 100;
 const MIN_HISTORY_CHARS = 500;
 
 // Системный префикс + «План принят»
-const DUMMY_PREFIX_REGEX = /^\s*\[(?:Песочница|Свободный режим)\]\s*Думаю\.\.\.\s*\n+(?:План принят\s*\(\d+\s+шагов?\)\.\s*Выполняем\.\.\.\s*\n+)?/i;
+const DUMMY_PREFIX_REGEX =
+  /^\s*\[(?:Песочница|Свободный режим)\]\s*Думаю\.\.\.\s*\n+(?:План принят\s*\(\d+\s+шагов?\)\.\s*Выполняем\.\.\.\s*\n+)?/i;
 
 // Маркеры executor-output: прячем целиком, чтобы модель не думала «уже сделал»
 const EXECUTOR_OUTPUT_REGEX = /(?:▶\s*Шаг\s*\d+|✔\s*Успешно|❌\s*Ошибка|✨\s*Готово)/;
@@ -61,8 +62,8 @@ function stripDummyPrefix(content) {
 function looksLikeLeakedJsonPlan(text) {
   const s = String(text || '').trim();
   if (!/"(?:tool|step)"\s*:/.test(s)) return false;
-  if (/^[\[{]/.test(s)) return true;
-  if (/[\[{][\s\S]*"(?:tool|step)"\s*:[\s\S]*[\]}]/.test(s)) return true;
+  if (/^[{[]/.test(s)) return true;
+  if (/[{[[\s\S]*"(?:tool|step)"\s*:[\s\S]*[\]}]/.test(s)) return true;
   return false;
 }
 
@@ -94,8 +95,7 @@ export function pruneMessages(
   const normalized = messages
     .filter((msg) => msg && typeof msg.content === 'string' && msg.content.trim().length > 0)
     .map((msg) => {
-      const role =
-        msg.role === 'assistant' || msg.role === 'system' ? msg.role : 'user';
+      const role = msg.role === 'assistant' || msg.role === 'system' ? msg.role : 'user';
       const contentRaw = normalizeNewlines(msg.content).trim();
       const content = truncateSafely(contentRaw, limChars);
       return { role, content };
@@ -119,9 +119,7 @@ export function buildRecentHistoryBlock(prunedMessages, opts = {}) {
 
   for (const m of historySlice) {
     const roleLabel =
-      m.role === 'assistant' ? 'Ассистент' :
-      m.role === 'system' ? 'Система' :
-      'Пользователь';
+      m.role === 'assistant' ? 'Ассистент' : m.role === 'system' ? 'Система' : 'Пользователь';
 
     let content = m.content;
     if (m.role === 'assistant') {

@@ -1,13 +1,47 @@
 // src/core/planParser.js
 import { MAX_PLAN_STEPS, clampPlanSteps } from './limits.js';
+import { toolsRegistry } from '../tools/registry.js';
 
 // ВАЖНО: список должен совпадать с ключами toolsRegistry (src/tools/registry.js).
 // Иначе normalizeStepObject молча отбрасывает шаг (баг 1.1: createDir отсутствовал).
 // Синхронность зафиксирована тестом tests/plan-parser-tools.test.js.
-const KNOWN_TOOLS = new Set([
-  'readFile', 'writeFile', 'createDir', 'deleteFile', 'listDir',
-  'analyzeProject', 'generateUnitTest', 'runCommand'
-]);
+// Блок 6.5: набор инструментов = ядро (KNOWN_CORE_TOOLS) ∪ загруженные плагины.
+const KNOWN_CORE_TOOLS = [
+  'readFile',
+  'writeFile',
+  'createDir',
+  'deleteFile',
+  'listDir',
+  'analyzeProject',
+  'generateUnitTest',
+  'runCommand',
+  'searchInFiles'
+];
+const KNOWN_TOOLS = new Set(KNOWN_CORE_TOOLS);
+
+/**
+ * Добавляет имена инструментов в набор, который принимает парсер плана.
+ * Вызывается при загрузке плагинов (см. pluginLoader.js).
+ * @param {Iterable<string>} names
+ */
+export function registerKnownTools(names) {
+  for (const name of names) KNOWN_TOOLS.add(name);
+}
+
+/**
+ * Синхронизирует набор с реестром (ядро + плагины). Возвращает добавленные имена.
+ * Экспортируется для тестов и сценариев hot-reload.
+ */
+export function syncKnownToolsFromRegistry() {
+  const added = [];
+  for (const name of Object.keys(toolsRegistry)) {
+    if (!KNOWN_TOOLS.has(name)) {
+      KNOWN_TOOLS.add(name);
+      added.push(name);
+    }
+  }
+  return added;
+}
 
 // Единый лимит шагов (см. src/core/limits.js) — реэкспорт для потребителей плана.
 export { MAX_PLAN_STEPS };
@@ -71,12 +105,23 @@ function extractBalanced(text, openChar, closeChar) {
 
   for (let i = start; i < text.length; i++) {
     const ch = text[i];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\') { escape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
     if (inString) continue;
     if (ch === openChar) depth++;
-    else if (ch === closeChar) { if (--depth === 0) return text.slice(start, i + 1); }
+    else if (ch === closeChar) {
+      if (--depth === 0) return text.slice(start, i + 1);
+    }
   }
   return null;
 }
@@ -87,10 +132,7 @@ function fixTrailingCommas(text) {
 
 function fixNewlinesInStrings(text) {
   return text.replace(/"((?:\\.|[^"\\])*)"/g, (match) => {
-    return match
-      .replace(/\r\n/g, '\\n')
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\n');
+    return match.replace(/\r\n/g, '\\n').replace(/\n/g, '\\n').replace(/\r/g, '\\n');
   });
 }
 
@@ -117,9 +159,15 @@ function sanitizeModelPlanText(rawText) {
 
 function tryParseJson(text) {
   if (!text) return null;
-  try { return JSON.parse(text); } catch (_) {}
-  try { return JSON.parse(fixNewlinesInStrings(text)); } catch (_) {}
-  try { return JSON.parse(fixTrailingCommas(fixNewlinesInStrings(text))); } catch (_) {}
+  try {
+    return JSON.parse(text);
+  } catch {}
+  try {
+    return JSON.parse(fixNewlinesInStrings(text));
+  } catch {}
+  try {
+    return JSON.parse(fixTrailingCommas(fixNewlinesInStrings(text)));
+  } catch {}
   return null;
 }
 
@@ -138,7 +186,7 @@ function deepUnwrapJson(value, depth = 0) {
     const s = value.trim();
     if (!s) return value;
     // Быстрая проверка: похоже ли на JSON
-    if (!/^[\[{]/.test(s)) return value;
+    if (!/^[{[]/.test(s)) return value;
     const parsed = tryParseJson(s);
     if (parsed === null) return value;
     return deepUnwrapJson(parsed, depth + 1);

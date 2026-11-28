@@ -34,30 +34,40 @@ export class NeuralSkillRouter {
     // 5: hasCodeOrSymbols (код, скобки, кавычки, стрелки, синтаксис JS/HTML/SCSS/SQL)
     // 6: hasAnalysisOrTest (анализ, статистика, структура, тест, проверка, рефакторинг, разбор)
     this.Wxh = [
-      [ 1.25, -0.35, -0.35, -0.40,  0.15, -0.15,  0.05], // Нейрон 0: диалог, вопросы, объяснения
-      [-0.30,  1.05,  0.40, -0.55,  0.00,  0.25,  0.35], // Нейрон 1: файловые операции и модули
-      [-0.25,  0.60,  0.95, -0.35,  0.15,  0.25,  0.25], // Нейрон 2: пути, расширения и каталоги
-      [-0.40, -0.30,  0.05,  1.45, -0.10,  0.10,  0.15], // Нейрон 3: команды, git/node/npm, запуск
-      [ 0.20,  0.10,  0.20,  0.00,  0.55,  0.05,  0.00], // Нейрон 4: короткие уточняющие реплики
-      [-0.10,  0.35,  0.30,  0.10, -0.15,  0.90,  0.25], // Нейрон 5: код, разметка и символы
-      [ 0.05,  0.50,  0.40,  0.10, -0.10,  0.20,  1.05], // Нейрон 6: анализ, структура, тесты, рефакторинг
-      [ 0.20,  0.20,  0.15,  0.15,  0.05,  0.15,  0.20]  // Нейрон 7: интегратор контекста
+      [1.25, -0.35, -0.35, -0.4, 0.15, -0.15, 0.05], // Нейрон 0: диалог, вопросы, объяснения
+      [-0.3, 1.05, 0.4, -0.55, 0.0, 0.25, 0.35], // Нейрон 1: файловые операции и модули
+      [-0.25, 0.6, 0.95, -0.35, 0.15, 0.25, 0.25], // Нейрон 2: пути, расширения и каталоги
+      [-0.4, -0.3, 0.05, 1.45, -0.1, 0.1, 0.15], // Нейрон 3: команды, git/node/npm, запуск
+      [0.2, 0.1, 0.2, 0.0, 0.55, 0.05, 0.0], // Нейрон 4: короткие уточняющие реплики
+      [-0.1, 0.35, 0.3, 0.1, -0.15, 0.9, 0.25], // Нейрон 5: код, разметка и символы
+      [0.05, 0.5, 0.4, 0.1, -0.1, 0.2, 1.05], // Нейрон 6: анализ, структура, тесты, рефакторинг
+      [0.2, 0.2, 0.15, 0.15, 0.05, 0.15, 0.2] // Нейрон 7: интегратор контекста
     ];
 
     // Рекуррентные веса скрытого слоя [hiddenSize][hiddenSize]
     this.Whh = Array.from({ length: this.hiddenSize }, (_, r) =>
-      Array.from({ length: this.hiddenSize }, (_, c) => (r === c ? 0.20 : 0.03))
+      Array.from({ length: this.hiddenSize }, (_, c) => (r === c ? 0.2 : 0.03))
     );
 
     // Выходные веса [skills.length][hiddenSize] -> ['chat', 'file_ops', 'system_cmd']
     this.Why = [
-      [ 1.45, -0.55, -0.50, -0.65,  0.20, -0.20,  0.05,  0.20], // chat
-      [-0.55,  1.25,  1.15, -0.65,  0.00,  0.55,  0.75,  0.10], // file_ops
-      [-0.60, -0.45, -0.20,  1.70, -0.10,  0.20, -0.05,  0.15]  // system_cmd
+      [1.45, -0.55, -0.5, -0.65, 0.2, -0.2, 0.05, 0.2], // chat
+      [-0.55, 1.25, 1.15, -0.65, 0.0, 0.55, 0.75, 0.1], // file_ops
+      [-0.6, -0.45, -0.2, 1.7, -0.1, 0.2, -0.05, 0.15] // system_cmd
     ];
 
     this.Bh = new Array(this.hiddenSize).fill(0.02);
-    this.By = [0.08, 0.02, 0.00];
+    this.By = [0.08, 0.02, 0.0];
+
+    this.Bh = new Array(this.hiddenSize).fill(0.02);
+    this.By = [0.08, 0.02, 0.0];
+
+    // Блок 6.2: буфер подтверждённых успехов для батч-дообучения.
+    // Онлайн-подкрепление (reinforceOutcome) применяется сразу, а батч —
+    // только когда накопится подтверждённый порог (см. recordConfirmedSuccess).
+    this.confirmedSamples = [];
+    this.confirmedThreshold = 3;
+    this.lastBatchTrainSize = 0;
 
     // Гибкие словари паттернов для русского и технического английского
     this.patterns = {
@@ -108,7 +118,11 @@ export class NeuralSkillRouter {
     return `${raw.slice(0, 320)} ${raw.slice(-280)}`;
   }
 
-  computeSignal(text, regex, { baseWeight = 0.5, stepWeight = 0.25, maxValue = 1.0, lengthNorm = 0 } = {}) {
+  computeSignal(
+    text,
+    regex,
+    { baseWeight = 0.5, stepWeight = 0.25, maxValue = 1.0, lengthNorm = 0 } = {}
+  ) {
     if (!text) return 0;
     const matches = text.match(regex);
     if (!matches || matches.length === 0) return 0;
@@ -253,11 +267,8 @@ export class NeuralSkillRouter {
     const input = this.extractFeatures(rawText);
 
     const clearTopicShift =
-      input[3] >= 0.7 ||
-      (input[0] >= 0.65 && input[1] === 0 && input[2] === 0);
-    const prevHidden = clearTopicShift
-      ? this.hiddenState.map((v) => v * 0.55)
-      : this.hiddenState;
+      input[3] >= 0.7 || (input[0] >= 0.65 && input[1] === 0 && input[2] === 0);
+    const prevHidden = clearTopicShift ? this.hiddenState.map((v) => v * 0.55) : this.hiddenState;
 
     const nextHidden = new Array(this.hiddenSize).fill(0);
 
@@ -292,25 +303,14 @@ export class NeuralSkillRouter {
     const isGreeting = this.greetingRegex.test(rawText);
 
     const isPureInfo =
-      input[0] >= 0.55 &&
-      input[1] < 0.15 &&
-      input[2] < 0.15 &&
-      input[3] < 0.15 &&
-      input[6] < 0.15;
+      input[0] >= 0.55 && input[1] < 0.15 && input[2] < 0.15 && input[3] < 0.15 && input[6] < 0.15;
 
     // Чистый короткий чат: активен только isShortReply, никаких
     // action-сигналов. Пример: «Напиши одно слово: тест».
     const isShortChatOnly =
-      input[4] >= 0.5 &&
-      input[1] < 0.15 &&
-      input[2] < 0.15 &&
-      input[3] < 0.15 &&
-      input[6] < 0.15;
+      input[4] >= 0.5 && input[1] < 0.15 && input[2] < 0.15 && input[3] < 0.15 && input[6] < 0.15;
 
-    const isClearFileAction =
-      input[1] >= 0.6 &&
-      input[2] >= 0.5 &&
-      input[3] < 0.4;
+    const isClearFileAction = input[1] >= 0.6 && input[2] >= 0.5 && input[3] < 0.4;
 
     const isClearSystemCmd = input[3] >= 0.7;
 
@@ -327,10 +327,7 @@ export class NeuralSkillRouter {
       input[0] >= 0.3 || // какой-то чат-сигнал всё-таки есть (или короткая реплика)
       input[4] >= 0.5;
     const noActionSignalsAtAll =
-      input[1] < 0.3 &&
-      input[2] < 0.3 &&
-      input[3] < 0.3 &&
-      input[6] < 0.3;
+      input[1] < 0.3 && input[2] < 0.3 && input[3] < 0.3 && input[6] < 0.3;
     const isWeakChatOnly = chatHasNoCompetition && noActionSignalsAtAll;
 
     if (isGreeting) {
@@ -407,7 +404,11 @@ export class NeuralSkillRouter {
     if (targetIndex === -1) return null;
 
     const prediction = this.predict(userText);
-    const probs = [prediction.scores.chat, prediction.scores.file_ops, prediction.scores.system_cmd];
+    const probs = [
+      prediction.scores.chat,
+      prediction.scores.file_ops,
+      prediction.scores.system_cmd
+    ];
 
     for (let k = 0; k < this.skills.length; k++) {
       const targetVal = k === targetIndex ? 1 : 0;
@@ -455,7 +456,9 @@ export class NeuralSkillRouter {
 
         this.By[k] = Number((this.By[k] + learningRate * error).toFixed(6));
         for (let i = 0; i < this.hiddenSize; i++) {
-          this.Why[k][i] = Number((this.Why[k][i] + learningRate * error * this.hiddenState[i]).toFixed(6));
+          this.Why[k][i] = Number(
+            (this.Why[k][i] + learningRate * error * this.hiddenState[i]).toFixed(6)
+          );
         }
       }
 
@@ -472,6 +475,43 @@ export class NeuralSkillRouter {
     } finally {
       this.hiddenState = savedHidden;
     }
+  }
+
+  /**
+   * Блок 6.2: ИНКРЕМЕНТАЛЬНАЯ ЗАПИСЬ ПОДТВЕРЖДЁННЫХ УСПЕХОВ.
+   * Принимает один подтверждённый успешный исход и накапливает его в буфере.
+   * Когда набирается confirmedThreshold образцов — выполняет батч-дообучение
+   * и очищает буфер. Вызывается из routes.js только по факту подтверждённого
+   * успеха (выполненный план / осмысленный чат-ответ), поэтому «шум» и
+   * провалы в выборку не попадают.
+   * @returns {{trained: boolean, reason?: string, pending?: number, batchSize?: number}}
+   */
+  recordConfirmedSuccess(userText, actualSkill, epochs = 3, learningRate = 0.04) {
+    if (typeof userText !== 'string' || !userText.trim()) {
+      return { trained: false, reason: 'invalid_input' };
+    }
+    if (!this.skills.includes(actualSkill)) {
+      return { trained: false, reason: 'unknown_skill' };
+    }
+
+    this.confirmedSamples.push({ text: userText, skill: actualSkill });
+    const pending = this.confirmedSamples.length;
+
+    if (pending < this.confirmedThreshold) {
+      return { trained: false, reason: 'pending', pending, threshold: this.confirmedThreshold };
+    }
+
+    const batch = this.confirmedSamples.slice();
+    this.trainBatch(batch, epochs, learningRate);
+    this.confirmedSamples = [];
+    this.lastBatchTrainSize = batch.length;
+
+    return {
+      trained: true,
+      batchSize: batch.length,
+      epochs,
+      skills: [...new Set(batch.map((s) => s.skill))]
+    };
   }
 
   trainBatch(samples, epochs = 3, learningRate = 0.04) {
@@ -531,9 +571,10 @@ export class NeuralSkillRouter {
         this.Whh = data.Whh;
         this.Why = data.Why;
         this.Bh = Array.isArray(data.Bh) && data.Bh.length === this.hiddenSize ? data.Bh : this.Bh;
-        this.By = Array.isArray(data.By) && data.By.length === this.skills.length ? data.By : this.By;
+        this.By =
+          Array.isArray(data.By) && data.By.length === this.skills.length ? data.By : this.By;
       }
-    } catch (_) {
+    } catch {
       // Используем стандартные веса по умолчанию
     }
   }

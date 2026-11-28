@@ -44,24 +44,27 @@ async function runSandboxTests() {
     stream: true
   });
 
-  const req = http.request({
-    hostname: 'localhost',
-    port: 3000,
-    path: '/v1/chat/completions',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(postData)
+  const req = http.request(
+    {
+      hostname: 'localhost',
+      port: 3000,
+      path: '/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    },
+    (res) => {
+      console.log(`📡 Статус ответа сервера: ${res.statusCode}`);
+      res.on('data', (chunk) => {
+        process.stdout.write(chunk);
+      });
+      res.on('end', () => {
+        console.log('\n\n✨ Все тесты на полигоне успешно завершены!');
+      });
     }
-  }, (res) => {
-    console.log(`📡 Статус ответа сервера: ${res.statusCode}`);
-    res.on('data', (chunk) => {
-      process.stdout.write(chunk);
-    });
-    res.on('end', () => {
-      console.log('\n\n✨ Все тесты на полигоне успешно завершены!');
-    });
-  });
+  );
 
   req.on('error', (e) => {
     console.error(`❌ Ошибка запроса к серверу (убедись, что server.js запущен): ${e.message}`);

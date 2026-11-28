@@ -12,9 +12,24 @@ const IGNORED_DIRS = new Set([
 ]);
 
 const TEXT_EXTENSIONS = new Set([
-  '.js', '.mjs', '.cjs', '.ts', '.jsx', '.tsx',
-  '.json', '.md', '.txt', '.html', '.css', '.scss',
-  '.yml', '.yaml', '.xml', '.env', '.sh', '.sql'
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.jsx',
+  '.tsx',
+  '.json',
+  '.md',
+  '.txt',
+  '.html',
+  '.css',
+  '.scss',
+  '.yml',
+  '.yaml',
+  '.xml',
+  '.env',
+  '.sh',
+  '.sql'
 ]);
 
 /**

@@ -24,9 +24,26 @@ const sessionRecords = {
 };
 
 const TEXT_EXTS = new Set([
-  '.js', '.mjs', '.cjs', '.ts', '.jsx', '.tsx',
-  '.json', '.md', '.txt', '.html', '.css', '.scss',
-  '.yml', '.yaml', '.xml', '.env', '.sh', '.sql', '.log', '.csv'
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.jsx',
+  '.tsx',
+  '.json',
+  '.md',
+  '.txt',
+  '.html',
+  '.css',
+  '.scss',
+  '.yml',
+  '.yaml',
+  '.xml',
+  '.env',
+  '.sh',
+  '.sql',
+  '.log',
+  '.csv'
 ]);
 
 function ensureDirs() {
@@ -107,7 +124,7 @@ export async function captureSandboxSnapshot(maxFileChars = 20000, maxFiles = 20
 
   async function walk(currentDir) {
     if (items.length >= maxFiles) return;
-    let entries = [];
+    let entries;
     try {
       entries = await fsPromises.readdir(currentDir, { withFileTypes: true });
     } catch {
@@ -133,16 +150,17 @@ export async function captureSandboxSnapshot(maxFileChars = 20000, maxFiles = 20
         await walk(fullPath);
       } else if (entry.isFile()) {
         let sizeBytes = 0;
-        let content = '';
+        let content;
         try {
           const stat = await fsPromises.stat(fullPath);
           sizeBytes = stat.size;
           const ext = path.extname(entry.name).toLowerCase();
           if (TEXT_EXTS.has(ext) || sizeBytes <= 64 * 1024) {
             const raw = await fsPromises.readFile(fullPath, 'utf8');
-            content = raw.length > maxFileChars
-              ? `${raw.slice(0, maxFileChars)}\n... [обрезано, всего ${raw.length} символов]`
-              : raw;
+            content =
+              raw.length > maxFileChars
+                ? `${raw.slice(0, maxFileChars)}\n... [обрезано, всего ${raw.length} символов]`
+                : raw;
           } else {
             content = `[бинарный или крупный файл: ${sizeBytes} Б]`;
           }
@@ -194,9 +212,7 @@ function renderRoutingBlock(routingInfo) {
   if (!routingInfo) return '';
 
   const rawJson =
-    typeof routingInfo === 'string'
-      ? routingInfo
-      : JSON.stringify(routingInfo, null, 2);
+    typeof routingInfo === 'string' ? routingInfo : JSON.stringify(routingInfo, null, 2);
 
   const clipped = clipForCdata(rawJson, MAX_ROUTING_JSON);
 
@@ -209,9 +225,10 @@ function renderRoutingBlock(routingInfo) {
 }
 
 function buildSessionXml(sessionType, records) {
-  const reportTitle = sessionType === 'test'
-    ? 'Конструкт АИ — Сводный XML-отчёт (ТЕСТЫ И ОПЕРАЦИИ)'
-    : 'Конструкт АИ — Сводный XML-отчёт (ЧАТ И ОПЕРАЦИИ)';
+  const reportTitle =
+    sessionType === 'test'
+      ? 'Конструкт АИ — Сводный XML-отчёт (ТЕСТЫ И ОПЕРАЦИИ)'
+      : 'Конструкт АИ — Сводный XML-отчёт (ЧАТ И ОПЕРАЦИИ)';
 
   const entriesXml = records
     .map((rec, idx) => {

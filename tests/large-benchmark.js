@@ -9,22 +9,26 @@ const TEST_SUITE = [
   {
     category: '🧮 1. АЛГОРИТМЫ И СТРУКТУРЫ ДАННЫХ',
     title: 'Кастомный LRU Cache',
-    prompt: 'Напиши реализацию класса LRUCache на JavaScript без сторонних библиотек. Укажи методы get и put, добавь пример использования.'
+    prompt:
+      'Напиши реализацию класса LRUCache на JavaScript без сторонних библиотек. Укажи методы get и put, добавь пример использования.'
   },
   {
     category: '🐞 2. РЕФАКТОРИНГ И ДЕБАГГИНГ',
     title: 'Поиск утечки памяти и асинхронных багов',
-    prompt: 'Найди ошибки в коде и перепиши правильно: `function loadData() { let data = fs.readFileSync("big.json"); setInterval(() => { console.log(data); }, 1000); }`'
+    prompt:
+      'Найди ошибки в коде и перепиши правильно: `function loadData() { let data = fs.readFileSync("big.json"); setInterval(() => { console.log(data); }, 1000); }`'
   },
   {
     category: '🏗️ 3. АРХИТЕКТУРНОЕ ПРОЕКТИРОВАНИЕ',
     title: 'Система ротации логов',
-    prompt: 'Спроектируй структуру модуля логирования на Node.js с поддержкой ротации файлов по размеру (макс 10MB) и 3 уровнями логов (info, warn, error).'
+    prompt:
+      'Спроектируй структуру модуля логирования на Node.js с поддержкой ротации файлов по размеру (макс 10MB) и 3 уровнями логов (info, warn, error).'
   },
   {
     category: '⚡ 4. КОМПЛЕКСНАЯ ЛОГИКА И СИНТАКСИС',
     title: 'Асинхронный пул задач (Task Queue)',
-    prompt: 'Напиши функцию asyncPool(concurrency, tasks), которая выполняет массив асинхронных функций с ограничением по параллельности.'
+    prompt:
+      'Напиши функцию asyncPool(concurrency, tasks), которая выполняет массив асинхронных функций с ограничением по параллельности.'
   }
 ];
 
@@ -61,10 +65,14 @@ async function runBenchmarkTask(test, index, total) {
 
     const usage = data.usage || {};
     const tokensCount = usage.completion_tokens || 0;
-    const tokensPerSec = usage.tokens_per_second || (tokensCount > 0 ? parseFloat((tokensCount / (durationMs / 1000)).toFixed(2)) : 0);
+    const tokensPerSec =
+      usage.tokens_per_second ||
+      (tokensCount > 0 ? parseFloat((tokensCount / (durationMs / 1000)).toFixed(2)) : 0);
 
     console.log(`✅ Выполнено за: ${durationMs} ms (${(durationMs / 1000).toFixed(2)}s)`);
-    console.log(`📊 Шагов в плане: ${stepsCount} | Токенов: ${tokensCount} | Скорость: ${tokensPerSec} tok/s`);
+    console.log(
+      `📊 Шагов в плане: ${stepsCount} | Токенов: ${tokensCount} | Скорость: ${tokensPerSec} tok/s`
+    );
     console.log(`💾 Изменение Heap: ${heapDiffMB > 0 ? '+' : ''}${heapDiffMB} MB`);
     console.log(`--------------------------------------------------`);
     console.log(`📥 Результат вывода:\n`);

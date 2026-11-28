@@ -32,8 +32,7 @@ after(async () => {
 
 // T1: режим песочницы стал per-request. Вместо мутации глобального
 // sandboxConfig.strictDefault он передаётся явным параметром { strict }.
-const runPlan = (plan, strict) =>
-  executePlan(plan, null, null, null, false, undefined, strict);
+const runPlan = (plan, strict) => executePlan(plan, null, null, null, false, undefined, strict);
 
 // ─────────────────────────────────────────────────────────────
 // 0. Глобальное состояние режима
@@ -87,10 +86,7 @@ describe('Свободный режим: resolveSafePath', () => {
   });
 
   test('strict — null-byte отклоняется', async () => {
-    await assert.rejects(
-      () => resolveSafePath('a\0b.txt', { strict: true }),
-      /нулевой байт/i
-    );
+    await assert.rejects(() => resolveSafePath('a\0b.txt', { strict: true }), /нулевой байт/i);
   });
 
   test('free — простое имя → WORKSPACE_ROOT', async () => {
@@ -136,7 +132,9 @@ describe('Свободный режим: executePlan', () => {
     await fs.rm(freeAbs, { force: true });
 
     const r = await runPlan(
-      [{ step: 1, tool: 'writeFile', arguments: { filePath: freeRel, content: 'free mode works' } }],
+      [
+        { step: 1, tool: 'writeFile', arguments: { filePath: freeRel, content: 'free mode works' } }
+      ],
       false
     );
     assert.equal(r.success, true, r.error);
@@ -176,7 +174,13 @@ describe('Свободный режим: executePlan', () => {
     await fs.rm(strictAbs, { force: true });
 
     const r = await runPlan(
-      [{ step: 1, tool: 'writeFile', arguments: { filePath: strictName, content: 'strict mode works' } }],
+      [
+        {
+          step: 1,
+          tool: 'writeFile',
+          arguments: { filePath: strictName, content: 'strict mode works' }
+        }
+      ],
       true
     );
     assert.equal(r.success, true, r.error);
@@ -187,7 +191,13 @@ describe('Свободный режим: executePlan', () => {
 
   test('strict — ../ проваливается с понятной ошибкой', async () => {
     const r = await runPlan(
-      [{ step: 1, tool: 'writeFile', arguments: { filePath: '../strict-escape.txt', content: 'nope' } }],
+      [
+        {
+          step: 1,
+          tool: 'writeFile',
+          arguments: { filePath: '../strict-escape.txt', content: 'nope' }
+        }
+      ],
       true
     );
     assert.equal(r.success, false);
@@ -196,7 +206,13 @@ describe('Свободный режим: executePlan', () => {
 
   test('free — ../ тоже проваливается (не выходим за WORKSPACE_ROOT)', async () => {
     const r = await runPlan(
-      [{ step: 1, tool: 'writeFile', arguments: { filePath: '../free-escape.txt', content: 'nope' } }],
+      [
+        {
+          step: 1,
+          tool: 'writeFile',
+          arguments: { filePath: '../free-escape.txt', content: 'nope' }
+        }
+      ],
       false
     );
     assert.equal(r.success, false);
@@ -221,11 +237,19 @@ describe('Параллельные запросы: разные режимы н�
 
     const [freeRes, strictRes] = await Promise.all([
       runPlan(
-        [{ step: 1, tool: 'writeFile', arguments: { filePath: freeRel, content: 'parallel free' } }],
+        [
+          { step: 1, tool: 'writeFile', arguments: { filePath: freeRel, content: 'parallel free' } }
+        ],
         false
       ),
       runPlan(
-        [{ step: 1, tool: 'writeFile', arguments: { filePath: strictName, content: 'parallel strict' } }],
+        [
+          {
+            step: 1,
+            tool: 'writeFile',
+            arguments: { filePath: strictName, content: 'parallel strict' }
+          }
+        ],
         true
       )
     ]);
@@ -254,7 +278,13 @@ describe('Параллельные запросы: разные режимы н�
         false
       ),
       runPlan(
-        [{ step: 1, tool: 'writeFile', arguments: { filePath: rel, content: 'should land in sandbox' } }],
+        [
+          {
+            step: 1,
+            tool: 'writeFile',
+            arguments: { filePath: rel, content: 'should land in sandbox' }
+          }
+        ],
         true
       )
     ]);
@@ -276,7 +306,11 @@ describe('Параллельные запросы: разные режимы н�
 
 describe(
   'Свободный режим: HTTP API (LLM)',
-  { skip: !process.env.RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false },
+  {
+    skip: !process.env.RUN_LLM_TESTS
+      ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start'
+      : false
+  },
   () => {
     const BASE = 'http://127.0.0.1:3000';
     const waitForFile = async (abs, timeoutMs = 3000) => {
@@ -326,7 +360,9 @@ describe(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: [{ role: 'user', content: `Создай файл "${name}" с текстом "api-strict works"` }],
+          messages: [
+            { role: 'user', content: `Создай файл "${name}" с текстом "api-strict works"` }
+          ],
           stream: false,
           strictSandbox: true
         })

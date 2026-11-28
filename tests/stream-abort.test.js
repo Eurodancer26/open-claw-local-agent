@@ -266,7 +266,11 @@ describe('executor: обрыв клиента', () => {
     );
 
     assert.equal(calls, 0, 'прерывание на step_start не должно запускать инструмент');
-    assert.equal(getActiveExecutionSignal(), null, 'controller снимается и при выброшенном AbortError');
+    assert.equal(
+      getActiveExecutionSignal(),
+      null,
+      'controller снимается и при выброшенном AbortError'
+    );
   });
 
   test('aborted-результат инструмента прерывает план и запрещает самокоррекцию', async () => {
@@ -376,7 +380,11 @@ describe('gpuMutex: однократный release при обрыве', () => {
     await second;
 
     assert.equal(secondAcquired, true, 'второй ожидающий должен получить слот');
-    assert.equal(thirdAcquired, false, 'третий ожидающий не должен получить слот от двойного release');
+    assert.equal(
+      thirdAcquired,
+      false,
+      'третий ожидающий не должен получить слот от двойного release'
+    );
     assert.equal(mutexReleased, true);
 
     gpuMutex.release(); // отпускаем за второй запрос

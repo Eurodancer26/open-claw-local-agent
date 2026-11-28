@@ -49,7 +49,10 @@ describe('Конструкт АИ — Сквозной тест агентичн
 
   it(
     'Агент должен составить план, реально создать файл на диске, прочитать его и вернуть финальный ответ по SSE',
-    { skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false, timeout: 300_000 },
+    {
+      skip: !RUN_LLM_TESTS ? 'нужен LLM: RUN_LLM_TESTS=true и запущенный npm start' : false,
+      timeout: 300_000
+    },
     async () => {
       console.log('   ▶ Отправка задачи агенту...');
 
@@ -79,7 +82,6 @@ describe('Конструкт АИ — Сквозной тест агентичн
       while (!doneReading) {
         const { value, done } = await reader.read();
         if (done) {
-          doneReading = true;
           break;
         }
 

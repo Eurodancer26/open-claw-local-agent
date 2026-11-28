@@ -78,7 +78,10 @@ describe('T2: runSafeCommand', () => {
     created.push(ROOT_MARKER, SANDBOX_MARKER);
 
     const { stdout } = await runSafeCommand('dir-list', { strict: true });
-    assert.ok(stdout.includes('rc-sandbox-marker.txt'), 'вывод strict dir-list должен содержать песочницу');
+    assert.ok(
+      stdout.includes('rc-sandbox-marker.txt'),
+      'вывод strict dir-list должен содержать песочницу'
+    );
     assert.ok(
       !stdout.includes('rc-root-marker.txt'),
       'вывод strict dir-list не должен содержать файлы корня проекта'
@@ -91,25 +94,37 @@ describe('T2: runSafeCommand', () => {
     created.push(ROOT_MARKER);
 
     const { stdout } = await runSafeCommand('dir-list', { strict: false });
-    assert.ok(stdout.includes('rc-root-marker.txt'), 'вывод free dir-list должен содержать корень проекта');
+    assert.ok(
+      stdout.includes('rc-root-marker.txt'),
+      'вывод free dir-list должен содержать корень проекта'
+    );
   });
 });
 
 describe('T2: инструмент runCommand', () => {
   test('strict: runCommand с git-status возвращает ошибку', async () => {
-    const res = await toolsRegistry.runCommand.execute({ commandId: 'git-status' }, { strict: true });
+    const res = await toolsRegistry.runCommand.execute(
+      { commandId: 'git-status' },
+      { strict: true }
+    );
     assert.equal(res.success, false);
     assert.match(res.error, /запрещена в строгом режиме песочницы/);
   });
 
   test('strict: runCommand с node-version по-прежнему работает', async () => {
-    const res = await toolsRegistry.runCommand.execute({ commandId: 'node-version' }, { strict: true });
+    const res = await toolsRegistry.runCommand.execute(
+      { commandId: 'node-version' },
+      { strict: true }
+    );
     assert.equal(res.success, true);
     assert.match(res.stdout.trim(), /^v\d+\.\d+\.\d+/);
   });
 
   test('free: runCommand с git-status выполняется', async () => {
-    const res = await toolsRegistry.runCommand.execute({ commandId: 'git-status' }, { strict: false });
+    const res = await toolsRegistry.runCommand.execute(
+      { commandId: 'git-status' },
+      { strict: false }
+    );
     assert.equal(res.success, true);
   });
 });
@@ -117,7 +132,14 @@ describe('T2: инструмент runCommand', () => {
 describe('T2: executePlan с режимом', () => {
   test('strict: план с git-status отклонён на валидации шага', async () => {
     const report = await runPlan(
-      [{ step: 1, tool: 'runCommand', arguments: { commandId: 'git-status' }, description: 'git status' }],
+      [
+        {
+          step: 1,
+          tool: 'runCommand',
+          arguments: { commandId: 'git-status' },
+          description: 'git status'
+        }
+      ],
       true
     );
     assert.equal(report.success, false);
@@ -127,7 +149,14 @@ describe('T2: executePlan с режимом', () => {
 
   test('strict: план с git-diff отклонён', async () => {
     const report = await runPlan(
-      [{ step: 1, tool: 'runCommand', arguments: { commandId: 'git-diff' }, description: 'git diff' }],
+      [
+        {
+          step: 1,
+          tool: 'runCommand',
+          arguments: { commandId: 'git-diff' },
+          description: 'git diff'
+        }
+      ],
       true
     );
     assert.equal(report.success, false);
@@ -136,7 +165,14 @@ describe('T2: executePlan с режимом', () => {
 
   test('strict: безопасная команда проходит', async () => {
     const report = await runPlan(
-      [{ step: 1, tool: 'runCommand', arguments: { commandId: 'node-version' }, description: 'node -v' }],
+      [
+        {
+          step: 1,
+          tool: 'runCommand',
+          arguments: { commandId: 'node-version' },
+          description: 'node -v'
+        }
+      ],
       true
     );
     assert.equal(report.success, true, report.error || '');
@@ -144,7 +180,14 @@ describe('T2: executePlan с режимом', () => {
 
   test('free: тот же план с git-status выполняется', async () => {
     const report = await runPlan(
-      [{ step: 1, tool: 'runCommand', arguments: { commandId: 'git-status' }, description: 'git status' }],
+      [
+        {
+          step: 1,
+          tool: 'runCommand',
+          arguments: { commandId: 'git-status' },
+          description: 'git status'
+        }
+      ],
       false
     );
     assert.equal(report.success, true, report.error || '');
@@ -155,10 +198,18 @@ describe('T2: executePlan с режимом', () => {
       { step: 1, tool: 'runCommand', arguments: { commandId: 'git-diff' }, description: 'git diff' }
     ];
     const freePlan = [
-      { step: 1, tool: 'runCommand', arguments: { commandId: 'git-status' }, description: 'git status' }
+      {
+        step: 1,
+        tool: 'runCommand',
+        arguments: { commandId: 'git-status' },
+        description: 'git status'
+      }
     ];
 
-    const [strictReport, freeReport] = await Promise.all([runPlan(strictPlan, true), runPlan(freePlan, false)]);
+    const [strictReport, freeReport] = await Promise.all([
+      runPlan(strictPlan, true),
+      runPlan(freePlan, false)
+    ]);
     assert.equal(strictReport.success, false);
     assert.match(strictReport.error, /запрещён в строгом режиме песочницы/);
     assert.equal(freeReport.success, true, freeReport.error || '');
@@ -172,7 +223,10 @@ describe('T2: npm-version (регрессия spawn EINVAL)', () => {
   });
 
   test('strict: runCommand npm-version разрешён и работает', async () => {
-    const res = await toolsRegistry.runCommand.execute({ commandId: 'npm-version' }, { strict: true });
+    const res = await toolsRegistry.runCommand.execute(
+      { commandId: 'npm-version' },
+      { strict: true }
+    );
     assert.equal(res.success, true, res.error || '');
     assert.match(res.stdout.trim(), /^\d+\.\d+\.\d+/);
   });

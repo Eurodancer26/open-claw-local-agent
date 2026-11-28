@@ -85,7 +85,7 @@ const SECTIONS = [
 const EXCLUDED = [
   /node_modules\//,
   /\.git\//,
-  /\.gguf$/i,        // бинарные модели (гигантские)
+  /\.gguf$/i, // бинарные модели (гигантские)
   /\.bin$/i,
   /\.(zip|tar|gz|7z|rar)$/i,
   /\.(png|jpe?g|gif|ico|svg|webp|bmp)$/i,
@@ -109,11 +109,16 @@ const escXml = (s) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
 
-const escCdata = (s) => String(s ?? '').split(']]>').join(']]]]><![CDATA[>');
+const escCdata = (s) =>
+  String(s ?? '')
+    .split(']]>')
+    .join(']]]]><![CDATA[>');
 
 // XML 1.0 не допускает большинство control-символов
-// eslint-disable-next-line no-control-regex
-const stripCtl = (s) => String(s ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+const stripCtl = (s) =>
+  String(s ?? '')
+    // eslint-disable-next-line no-control-regex -- намеренно вырезаем управляющие символы для XML
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
 
 async function walk(dir, relBase, exclude = null, maxFileSize = MAX_FILE_SIZE) {
   const out = [];
@@ -180,9 +185,7 @@ async function collectSection(section) {
         files.push({ path: p, size: stat.size, content });
       }
     } else if (stat.isDirectory()) {
-      files.push(
-        ...(await walk(full, p, section.exclude, section.maxFileSize || MAX_FILE_SIZE))
-      );
+      files.push(...(await walk(full, p, section.exclude, section.maxFileSize || MAX_FILE_SIZE)));
     }
   }
   return files;
@@ -261,9 +264,7 @@ async function main() {
     collected.push({ section, files });
   }
 
-  console.log(
-    `\n📊 Итого: ${totalFiles} файлов, ${(totalBytes / 1024 / 1024).toFixed(2)} MB\n`
-  );
+  console.log(`\n📊 Итого: ${totalFiles} файлов, ${(totalBytes / 1024 / 1024).toFixed(2)} MB\n`);
   console.log('🌳 Строю дерево директорий...');
   const tree = await buildDirectoryTree();
 

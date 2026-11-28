@@ -1,59 +1,83 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Конструкт АИ — Локальный агент</title>
-  <link rel="stylesheet" href="style.css" />
-</head>
-<body>
-  <div class="app">
-    <header class="header">
-      <div class="header__brand">
-        <span class="header__logo">⚡</span>
-        <div>
-          <h1 class="header__title">Конструкт АИ</h1>
-          <span class="header__subtitle">Локальный автономный агент</span>
-        </div>
-      </div>
-
-      <div class="header__actions">
-        <div class="sandbox-control" title="В строгом режиме все файлы создаются и удаляются исключительно внутри tests/sandbox/">
-          <span class="sandbox-control__label" id="sandbox-mode-label">🔒 Песочница (Строго)</span>
-          <label class="switch">
-            <input type="checkbox" id="sandbox-toggle" checked />
-            <span class="switch__slider"></span>
-          </label>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Конструкт АИ — Локальный агент</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="header__brand">
+          <span class="header__logo">⚡</span>
+          <div>
+            <h1 class="header__title">Конструкт АИ</h1>
+            <span class="header__subtitle">Локальный автономный агент</span>
+          </div>
         </div>
 
-        <button type="button" class="reset-btn" id="reset-session-btn" title="Очистить историю чата и сбросить сессию модели">
-          Сброс
-        </button>
-      </div>
-    </header>
+        <div class="header__actions">
+          <div
+            class="transport-control"
+            title="Транспорт стриминга: SSE (EventSource-поток) или WebSocket"
+          >
+            <span class="transport-control__label">Транспорт</span>
+            <select id="transport-select" class="transport-control__select">
+              <option value="sse" selected>SSE</option>
+              <option value="ws">WebSocket</option>
+            </select>
+          </div>
 
-    <main class="chat" id="chat-messages">
-      <div class="message message--assistant">
-        <div class="message__bubble">
-          Привет! Я твой локальный агент. Напиши задачу, и я разобью её на шаги, выполню и выведу результат.<br><br>
-          Сейчас включен <strong>строгий режим песочницы</strong> — все файлы автоматически изолируются в <code>tests/sandbox/</code>. Если переключить ползунок вверху, я получу свободу выбора директорий (но сначала уточню папку у тебя).
+          <div
+            class="sandbox-control"
+            title="В строгом режиме все файлы создаются и удаляются исключительно внутри tests/sandbox/"
+          >
+            <span class="sandbox-control__label" id="sandbox-mode-label"
+              >🔒 Песочница (Строго)</span
+            >
+            <label class="switch">
+              <input type="checkbox" id="sandbox-toggle" checked />
+              <span class="switch__slider"></span>
+            </label>
+          </div>
+
+          <button
+            type="button"
+            class="reset-btn"
+            id="reset-session-btn"
+            title="Очистить историю чата и сбросить сессию модели"
+          >
+            Сброс
+          </button>
         </div>
-      </div>
-    </main>
+      </header>
 
-    <form class="input-bar" id="chat-form">
-      <input
-        type="text"
-        id="user-input"
-        class="input-bar__field"
-        placeholder="Например: Создай файл test.js или Что ты умеешь?"
-        autocomplete="off"
-        required
-      />
-      <button type="submit" class="input-bar__button" id="send-btn">Отправить</button>
-    </form>
-  </div>
+      <main class="chat" id="chat-messages">
+        <div class="message message--assistant">
+          <div class="message__bubble">
+            Привет! Я твой локальный агент. Напиши задачу, и я разобью её на шаги, выполню и выведу
+            результат.<br /><br />
+            Сейчас включен <strong>строгий режим песочницы</strong> — все файлы автоматически
+            изолируются в <code>tests/sandbox/</code>. Если переключить ползунок вверху, я получу
+            свободу выбора директорий (но сначала уточню папку у тебя).
+          </div>
+        </div>
+      </main>
 
-  <script src="app.js"></script>
-</body>
+      <form class="input-bar" id="chat-form">
+        <input
+          type="text"
+          id="user-input"
+          class="input-bar__field"
+          placeholder="Например: Создай файл test.js или Что ты умеешь?"
+          autocomplete="off"
+          required
+        />
+        <button type="submit" class="input-bar__button" id="send-btn">Отправить</button>
+      </form>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
 </html>

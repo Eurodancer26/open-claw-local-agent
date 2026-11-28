@@ -68,14 +68,18 @@ async function verifyNearestExistingAncestor(targetPath, realRoot) {
       const realCurrent = await fs.realpath(current);
       const rel = path.relative(realRoot, realCurrent);
       if (rel.startsWith('..') || path.isAbsolute(rel)) {
-        throw new Error('Нарушение безопасности: родительская директория находится вне разрешенной зоны.');
+        throw new Error(
+          'Нарушение безопасности: родительская директория находится вне разрешенной зоны.'
+        );
       }
       return;
     } catch (err) {
       if (err.code === 'ENOENT') {
         const parent = path.dirname(current);
         if (parent === current) {
-          throw new Error('Нарушение безопасности: не удалось подтвердить корневую директорию.');
+          throw new Error('Нарушение безопасности: не удалось подтвердить корневую директорию.', {
+            cause: err
+          });
         }
         current = parent;
         continue;
@@ -89,8 +93,7 @@ async function verifyNearestExistingAncestor(targetPath, realRoot) {
  * Строгая проверка безопасности пути с поддержкой жёсткого режима песочницы по умолчанию.
  */
 export async function resolveSafePath(userPath, options = {}) {
-  const strict =
-    typeof options?.strict === 'boolean' ? options.strict : DEFAULT_STRICT_SANDBOX;
+  const strict = typeof options?.strict === 'boolean' ? options.strict : DEFAULT_STRICT_SANDBOX;
 
   if (!userPath || typeof userPath !== 'string') {
     throw new Error('Некорректный путь: путь должен быть непустой строкой.');

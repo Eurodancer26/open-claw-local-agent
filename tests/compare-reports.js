@@ -11,7 +11,7 @@ function compareReports() {
     return;
   }
 
-  const files = fs.readdirSync(reportsDir).filter(f => f.endsWith('.json'));
+  const files = fs.readdirSync(reportsDir).filter((f) => f.endsWith('.json'));
 
   if (files.length === 0) {
     console.log('⚠️ В папке reports/ не найдено JSON-отчетов для сравнения.');
@@ -19,7 +19,7 @@ function compareReports() {
   }
 
   // Загружаем и парсим все отчеты
-  const reports = files.map(file => {
+  const reports = files.map((file) => {
     const filePath = path.join(reportsDir, file);
     const content = fs.readFileSync(filePath, 'utf-8');
     return { filename: file, data: JSON.parse(content) };
@@ -41,7 +41,7 @@ function compareReports() {
     console.log(`--------------------------------------------------`);
 
     if (d.results && Array.isArray(d.results)) {
-      d.results.forEach(res => {
+      d.results.forEach((res) => {
         const status = res.success ? '✅' : '❌';
         const timeStr = `${res.durationSec}s`;
         const tokStr = res.tokensPerSec !== undefined ? `${res.tokensPerSec} tok/s` : 'N/A';
