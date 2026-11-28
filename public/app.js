@@ -6,7 +6,9 @@ const sandboxToggle = document.getElementById('sandbox-toggle');
 const sandboxModeLabel = document.getElementById('sandbox-mode-label');
 const resetSessionBtn = document.getElementById('reset-session-btn');
 
-const MAX_HISTORY_MESSAGES = 12;
+// T6: лимит истории приходит с сервера (/v1/mind -> dialogHistory),
+// значение ниже — только до первого ответа сервера.
+let MAX_HISTORY_MESSAGES = 12;
 let messageHistory = [];
 
 function trimHistory() {
@@ -34,6 +36,11 @@ async function syncMindState() {
       sandboxToggle.checked = data.strictSandbox;
     } else if (data.mode === 'strict' || data.mode === 'free') {
       sandboxToggle.checked = data.mode === 'strict';
+    }
+    const serverLimit = data?.dialogHistory?.maxMessages;
+    if (Number.isInteger(serverLimit) && serverLimit > 0) {
+      MAX_HISTORY_MESSAGES = serverLimit;
+      trimHistory();
     }
     updateSandboxLabel();
   } catch {

@@ -1,32 +1,38 @@
 // src/tools/registry.js
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { WORKSPACE_ROOT, SANDBOX_REL, sandboxConfig, resolveSafePath } from './pathSecurity.js';
+import {
+  WORKSPACE_ROOT,
+  SANDBOX_REL,
+  sandboxConfig,
+  DEFAULT_STRICT_SANDBOX,
+  resolveSafePath
+} from './pathSecurity.js';
 import { scanProjectStats } from './projectScanner.js';
 import { runSafeCommand } from './safeCommands.js';
 
-export { sandboxConfig, resolveSafePath };
+export { sandboxConfig, DEFAULT_STRICT_SANDBOX, resolveSafePath };
 
 const MAX_READ_BYTES = 5 * 1024 * 1024; // 5 МБ — потолок для readFile
 
 export const toolsRegistry = {
   readFile: {
     description: 'Читает содержимое файла. Аргументы: { "filePath": "путь/к/файлу" }',
-    async execute(args = {}) {
+    async execute(args = {}, options = {}) {
       try {
         const targetPath = args.filePath || args.path;
         if (!targetPath || typeof targetPath !== 'string') {
           return { success: false, error: 'readFile: не указан filePath' };
         }
-        const safePath = await resolveSafePath(targetPath);
+        const safePath = await resolveSafePath(targetPath, options);
         const stat = await fs.stat(safePath);
         if (stat.isDirectory()) {
-          return { success: false, error: `readFile: путь указывает на директорию, а не файл: ${targetPath}` };
+          return { success: false, error: `readFile: путь указывает на директорию, а не файл: ${targetPath}. Используй listDir.` };
         }
         if (stat.size > MAX_READ_BYTES) {
           return {
             success: false,
-            error: `readFile: файл слишком большой (${stat.size} Б, максимум ${MAX_READ_BYTES} Б). Используй другой инструмент или прочитай фрагмент вручную.`
+            error: `readFile: файл слишком большой (${stat.size} Б, максимум ${MAX_READ_BYTES} Б).`
           };
         }
         const content = await fs.readFile(safePath, 'utf8');
@@ -38,19 +44,26 @@ export const toolsRegistry = {
   },
 
   writeFile: {
-    description: 'Записывает текст в файл. Аргументы: { "filePath": "путь/к/файлу", "content": "текст" }',
-    async execute(args = {}) {
+    description: 'Записывает текст в файл. Создаёт файл и все нужные родительские папки. Для создания только папки используй createDir. Аргументы: { "filePath": "путь/к/файлу", "content": "текст" }',
+    async execute(args = {}, options = {}) {
       try {
         const targetPath = args.filePath || args.path;
         if (!targetPath || typeof targetPath !== 'string') {
           return { success: false, error: 'writeFile: не указан filePath' };
+        }
+        // Если пользователь пишет "папка/" с завершающим слэшем — это ошибка
+        if (/[\\/]\s*$/.test(targetPath)) {
+          return {
+            success: false,
+            error: `writeFile: путь "${targetPath}" заканчивается слэшем — похоже, это директория. Используй createDir для создания папки.`
+          };
         }
         const content = args.content ?? '';
         if (typeof content !== 'string' && typeof content !== 'number' && typeof content !== 'boolean') {
           return { success: false, error: 'writeFile: content должен быть строкой' };
         }
         const text = String(content);
-        const safePath = await resolveSafePath(targetPath);
+        const safePath = await resolveSafePath(targetPath, options);
         await fs.mkdir(path.dirname(safePath), { recursive: true });
         await fs.writeFile(safePath, text, 'utf8');
         return {
@@ -65,24 +78,69 @@ export const toolsRegistry = {
     }
   },
 
+  createDir: {
+    description: 'Создаёт директорию (включая все родительские папки, как mkdir -p). Не перезаписывает существующие. Аргументы: { "dirPath": "путь/к/папке" }',
+    async execute(args = {}, options = {}) {
+      try {
+        const targetDir = args.dirPath || args.path;
+        if (!targetDir || typeof targetDir !== 'string') {
+          return { success: false, error: 'createDir: не указан dirPath' };
+        }
+        if (/\.\w{1,8}$/.test(targetDir) && !/[\\/]/.test(targetDir)) {
+          // Простая эвристика: "foo.txt" — похоже на файл, а не папку
+          return {
+            success: false,
+            error: `createDir: "${targetDir}" похоже на имя файла (есть расширение). Для файлов используй writeFile.`
+          };
+        }
+        const safePath = await resolveSafePath(targetDir, options);
+
+        // Проверяем, существует ли уже
+        let existed = false;
+        try {
+          const stat = await fs.stat(safePath);
+          if (!stat.isDirectory()) {
+            return { success: false, error: `createDir: путь уже существует и это не директория: ${targetDir}` };
+          }
+          existed = true;
+        } catch (err) {
+          if (err.code !== 'ENOENT') throw err;
+        }
+
+        await fs.mkdir(safePath, { recursive: true });
+        const rel = path.relative(WORKSPACE_ROOT, safePath);
+        return {
+          success: true,
+          dirPath: rel,
+          created: !existed,
+          message: existed ? `Директория уже существует: ${rel}` : `Директория создана: ${rel}`
+        };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+  },
+
   deleteFile: {
-    description: 'Удаляет файл. Аргументы: { "filePath": "путь/к/файлу" }',
-    async execute(args = {}) {
+    description: 'Удаляет файл (не директорию). Аргументы: { "filePath": "путь/к/файлу" }',
+    async execute(args = {}, options = {}) {
       try {
         const targetPath = args.filePath || args.path;
         if (!targetPath || typeof targetPath !== 'string') {
           return { success: false, error: 'deleteFile: не указан filePath' };
         }
-        const safePath = await resolveSafePath(targetPath);
+        const safePath = await resolveSafePath(targetPath, options);
 
         try {
           const stat = await fs.lstat(safePath);
           if (stat.isDirectory()) {
-            return { success: false, error: `deleteFile: путь указывает на директорию, а не файл: ${targetPath}. Удаление директорий не поддерживается.` };
+            return {
+              success: false,
+              error: `deleteFile: путь указывает на директорию, а не файл: ${targetPath}. Удаление директорий не поддерживается.`
+            };
           }
         } catch (err) {
           if (err.code !== 'ENOENT') throw err;
-          // Если файла нет — unlink ниже сам даст понятную ошибку ENOENT.
         }
 
         await fs.unlink(safePath);
@@ -99,10 +157,10 @@ export const toolsRegistry = {
 
   listDir: {
     description: 'Возвращает список файлов и папок в директории. Аргументы: { "dirPath": "." }',
-    async execute(args = {}) {
+    async execute(args = {}, options = {}) {
       try {
         const targetDir = args.dirPath || args.path || '.';
-        const safePath = await resolveSafePath(targetDir);
+        const safePath = await resolveSafePath(targetDir, options);
         const stat = await fs.stat(safePath);
         if (!stat.isDirectory()) {
           return { success: false, error: `listDir: путь не является директорией: ${targetDir}` };
@@ -125,10 +183,10 @@ export const toolsRegistry = {
 
   analyzeProject: {
     description: 'Анализирует структуру директории/проекта: файлы, папки, строки кода, зависимости из package.json и крупные файлы. Аргументы: { "dirPath": "." }',
-    async execute(args = {}) {
+    async execute(args = {}, options = {}) {
       try {
         const targetDir = args.dirPath || args.path || '.';
-        const safePath = await resolveSafePath(targetDir);
+        const safePath = await resolveSafePath(targetDir, options);
         const dirStat = await fs.stat(safePath);
 
         if (!dirStat.isDirectory()) {
@@ -180,17 +238,16 @@ export const toolsRegistry = {
 
   generateUnitTest: {
     description: 'Читает исходный файл и генерирует заготовку unit-теста на node:test. Аргументы: { "sourcePath": "путь/к/модулю.js", "outputPath": "путь/к/тесту.test.js" }',
-    async execute(args = {}) {
+    async execute(args = {}, options = {}) {
       try {
         const srcInput = args.sourcePath || args.filePath || args.path;
         if (!srcInput || typeof srcInput !== 'string') {
           return { success: false, error: 'generateUnitTest: не указан путь к исходному файлу (sourcePath).' };
         }
 
-        const safeSrc = await resolveSafePath(srcInput);
+        const safeSrc = await resolveSafePath(srcInput, options);
         const sourceCode = await fs.readFile(safeSrc, 'utf8');
 
-        // Определение экспортируемых символов (несколько форматов)
         const fnMatches = [
           ...sourceCode.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/g)
         ].map((m) => m[1]);
@@ -203,7 +260,6 @@ export const toolsRegistry = {
           ...sourceCode.matchAll(/(?:^|\n)\s*(?:export\s+(?:default\s+)?)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g)
         ].map((m) => m[1]);
 
-        // module.exports = { a, b, c }
         const cjsObjectMatch = sourceCode.match(/module\.exports\s*=\s*\{([^}]*)\}/);
         const cjsObjectKeys = cjsObjectMatch
           ? cjsObjectMatch[1]
@@ -212,7 +268,6 @@ export const toolsRegistry = {
               .filter((k) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k))
           : [];
 
-        // module.exports.name = ...
         const cjsNamedMatches = [
           ...sourceCode.matchAll(/module\.exports\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g)
         ].map((m) => m[1]);
@@ -224,7 +279,7 @@ export const toolsRegistry = {
         const baseName = path.basename(safeSrc, path.extname(safeSrc));
         const defaultOut = `${baseName}.generated.test.js`;
         const rawOut = args.outputPath || defaultOut;
-        const safeOut = await resolveSafePath(rawOut);
+        const safeOut = await resolveSafePath(rawOut, options);
 
         const relImport = path
           .relative(path.dirname(safeOut), safeSrc)
@@ -277,14 +332,14 @@ export const toolsRegistry = {
   },
 
   runCommand: {
-    description: 'Выполняет разрешенную команду из белого списка. Аргументы: { "commandId": "node-version" | "npm-version" | "dir-list" | "git-status" | "git-diff" }',
-    async execute(args = {}) {
+    description: 'Выполняет разрешенную команду из белого списка. Аргументы: { "commandId": "node-version" | "npm-version" | "dir-list" | "git-status" | "git-diff" }. В строгом режиме git-status/git-diff запрещены.',
+    async execute(args = {}, options = {}) {
       try {
         const commandId = args.commandId || args.command;
         if (!commandId || typeof commandId !== 'string') {
           return { success: false, error: 'runCommand: не указан commandId' };
         }
-        const { stdout, stderr } = await runSafeCommand(commandId);
+        const { stdout, stderr } = await runSafeCommand(commandId, options);
         return {
           success: true,
           commandId,
@@ -293,6 +348,14 @@ export const toolsRegistry = {
           stderr: stderr ?? ''
         };
       } catch (err) {
+        // Обрыв клиента не маскируем под обычную ошибку инструмента.
+        if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+          return {
+            success: false,
+            aborted: true,
+            error: 'Генерация прервана: клиент разорвал соединение'
+          };
+        }
         return { success: false, error: err.message };
       }
     }
@@ -303,7 +366,8 @@ const FORBIDDEN_TOOLS = [
   'chat', 'date', 'time', 'getDate', 'getTime',
   'format', 'formatCode', 'prettier', 'lint', 'deploy', 'hash',
   'generateCode', 'bundle', 'rollup', 'webpack', 'publish',
-  'fetch', 'http', 'curl', 'browser', 'search', 'webSearch'
+  'fetch', 'http', 'curl', 'browser', 'search', 'webSearch',
+  'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch'
 ];
 
 /**

@@ -128,6 +128,7 @@
 
 * **Сериализация доступа к GPU**: `gpuMutex` гарантирует, что одновременные HTTP-запросы не вызовут гонку за контекст `node-llama-cpp`.
 * **Контроль контекста**: `pruneMessages` ограничивает историю (`DEFAULT_MAX_CONTEXT_MESSAGES = 12`, `DEFAULT_MAX_CHARS_PER_MESSAGE = 2000`).
+  * Лимиты памяти диалога вынесены в `contextPruner.js` (`DEFAULT_MAX_HISTORY_MESSAGES = 6`, `DEFAULT_MAX_HISTORY_CHARS = 6000`) и отдаются клиенту в `GET /v1/mind` → `dialogHistory` (клиент стартует с 12 и подхватывает серверное значение).
 * **Скрытие executor-output из истории**: сообщения ассистента, содержащие `▶ Шаг`, `✔ Успешно`, `❌ Ошибка` или `✨ Готово`, заменяются на `[предыдущее выполнение завершено, детали скрыты из контекста]` — предотвращает «модель думает, что уже сделала».
 * **Обрезка с учётом code fences**: при превышении `maxCharsPerMessage` блок ```` ``` ```` не разрезается пополам.
 
@@ -140,7 +141,7 @@
 | Режим | Промпт | Что видит модель |
 | :--- | :--- | :--- |
 | `mode=chat` | `buildTextOnlyPrompt` | Только правило «ответь текстом». **Никаких** правил JSON, инструментов и примеров планов. |
-| `mode=action / mixed / unknown` | `buildCognitivePrompt` | Каталог 7 инструментов + правила формата JSON + примеры с placeholder'ами. |
+| `mode=action / mixed / unknown` | `buildCognitivePrompt` | Каталог 8 инструментов + правила формата JSON + примеры с placeholder'ами. |
 | `stream:false` | `buildNonStreamPrompt` / `buildTextOnlyPrompt` | Аналогично, но без SSE-логики. |
 
 Дополнительно: `chatFormatter.js` содержит **жёсткий список запрещённых инструментов** (`chat`, `date`, `deploy`, `hash`, `format` и т.п.) с явной пометкой «их не существует». Это устраняет класс ошибок, когда модель выдумывала `{"tool":"chat"}`.
@@ -167,6 +168,7 @@
 | :--- | :--- | :--- |
 | `readFile` | `{ "filePath": "..." }` | Чтение текстового файла. Проверка директории и размера (≤ 5 МБ). |
 | `writeFile` | `{ "filePath": "...", "content": "..." }` | Создание/перезапись с рекурсивным созданием папок. Возвращает `filePath`, `bytesWritten`. |
+| `createDir` | `{ "dirPath": "..." }` | Создание каталога (рекурсивно, как `mkdir -p`). Отказывает, если путь похож на файл. Возвращает `dirPath`, `created`. |
 | `deleteFile` | `{ "filePath": "..." }` | Удаление файла. Проверка, что это не директория. |
 | `listDir` | `{ "dirPath": "." }` | Список файлов и поддиректорий с типом (`dir` / `file`). |
 | `analyzeProject` | `{ "dirPath": "." }` | Рекурсивный аудит: папки, файлы, строки кода, разбивка по расширениям, топ крупных файлов, `package.json`. |
@@ -177,16 +179,17 @@
 
 * `node-version`, `npm-version`, `dir-list`, `git-status`, `git-diff`
 
-Все команды выполняются через `child_process.execFile` без запуска shell. Произвольные shell-строки заблокированы.
+Все команды выполняются через `child_process.execFile` без запуска shell. Произвольные shell-строки заблокированы. На Windows `.cmd`/`.bat` (например `npm.cmd`) запускаются через `cmd.exe /c <script> <args…>` с фиксированным списком аргументов — прямой `execFile` по `.cmd` в Node отклоняется (`spawn EINVAL`).
 
 ---
 
 ## Модель безопасности и режимы работы
 
-1. **Строгий режим песочницы (`strictDefault: true`)**
+1. **Строгий режим песочницы (`DEFAULT_STRICT_SANDBOX = true` — замороженный дефолт)**
+   * Режим выбирается на каждый запрос параметром `strictSandbox`; дефолт `true` заморожен (`Object.freeze`) и никогда не мутируется. Внутренние вызовы передают режим явно через `{ strict }`.
    * Все относительные пути автоматически изолируются внутри `tests/sandbox/`.
    * Попытки выхода (`../`, абсолютные пути, корень проекта) отклоняются на уровне `resolveSafePath` и в системных инструкциях модели.
-2. **Свободный режим (`strictDefault: false`)**
+2. **Свободный режим (`strictSandbox: false` в запросе)**
    * Доступ ко всей рабочей директории проекта.
    * Правило уточнения пути: если директория не указана — модель отвечает текстом и просит уточнить.
 3. **Защита от Path Traversal и симлинков (`pathSecurity.js`)**
@@ -220,13 +223,15 @@ open-claw-local-agent/
 ├── src/
 │   ├── api/
 │   │   ├── chatFormatter.js              # Промпты, форматтеры результатов инструментов
-│   │   └── routes.js                     # REST/SSE маршруты, развилка mode, ActionRetry
+│   │   ├── routes.js                     # REST/SSE маршруты, развилка mode, ActionRetry
+│   │   └── streamGuard.js                # Отмена/обрыв стрима: AbortSignal, безопасный send/end
 │   ├── config/
 │   │   └── index.js
 │   ├── core/
 │   │   ├── contextPruner.js              # Обрезка истории, скрытие executor-output
 │   │   ├── engine.js
 │   │   ├── executor.js                   # Валидация аргументов, Loop Guard, rawOutput
+│   │   ├── limits.js                     # MAX_PLAN_STEPS — единый лимит шагов плана
 │   │   ├── mutex.js
 │   │   ├── neuralRouter.js               # mode: chat/action/mixed/unknown
 │   │   ├── planParser.js                 # deepUnwrapJson, фильтр известных tools
@@ -235,22 +240,29 @@ open-claw-local-agent/
 │   ├── tools/
 │   │   ├── pathSecurity.js               # Null-byte, UNC, symlink, обход предков
 │   │   ├── projectScanner.js
-│   │   ├── registry.js                   # 7 инструментов, каталог для промпта
+│   │   ├── registry.js                   # 8 инструментов, каталог для промпта
 │   │   └── safeCommands.js
 │   └── server.js
 ├── tests/
 │   ├── sandbox/                          # Изолированная директория (в .gitignore, кроме .gitkeep)
+│   ├── free_mode/                        # Каталог свободного режима (в .gitignore, кроме .gitkeep)
 │   ├── agent-loop.test.js
 │   ├── analyze-project.test.js
 │   ├── benchmark.js
 │   ├── benchmark-clean.js
 │   ├── compare-reports.js
 │   ├── executor.test.js
+│   ├── free-mode.test.js
 │   ├── generate-unit-test.test.js
 │   ├── large-benchmark.js
+│   ├── plan-limits.test.js
+│   ├── plan-parser-tools.test.js
 │   ├── planner.test.js
 │   ├── run-all.test.js
+│   ├── runcommand-sandbox.test.js
 │   ├── self-correction.test.js
+│   ├── session-history.test.js
+│   ├── stream-abort.test.js
 │   ├── test-multi-step-agent.js
 │   ├── test-router.js
 │   ├── test-sandbox-agent.js
@@ -357,6 +369,8 @@ curl -X POST http://127.0.0.1:3000/v1/chat/completions \
 * `reports/chats/chat_report_<SESSION_ID>.xml` — диалоги и выполненные планы.
 * `reports/tests/test_report_<SESSION_ID>.xml` — тестовые прогоны.
 
+Ограничение размера плана — единая константа `MAX_PLAN_STEPS = 128` в `src/core/limits.js`, используемая и парсером (`planParser.js`), и исполнителем (`executor.js`).
+
 Каждый отчёт фиксирует:
 * `<mode value="strict|free">` — режим (машинно-читаемый атрибут).
 * `<routing mode="chat|action|mixed|unknown">` — решение роутера.
@@ -386,7 +400,7 @@ curl -X POST http://127.0.0.1:3000/v1/chat/completions \
 ### Этап 3: Модульная архитектура, нейро-роутинг, расширенные инструменты — Выполнено
 * [x] Декомпозиция монолитов (`chatFormatter.js`, `contextPruner.js`, `planParser.js`, `pathSecurity.js`, `projectScanner.js`, `safeCommands.js`).
 * [x] `NeuralSkillRouter` с `mode` (`chat`/`action`/`mixed`/`unknown`), пост-обработкой и сохранением весов.
-* [x] Расширение реестра до 7 инструментов.
+* [x] Расширение реестра до 8 инструментов (добавлен `createDir`).
 
 ### Этап 4: Устранение contamination и повышение надёжности — Выполнено
 * [x] **Разделение промптов** `buildTextOnlyPrompt` / `buildCognitivePrompt` по `mode`. Устранён класс багов «JSON на приветствие».
@@ -398,11 +412,12 @@ curl -X POST http://127.0.0.1:3000/v1/chat/completions \
 * [x] **`rawOutput` в `executor.js`** — интерполяция `{{stepN.output}}` не подмешивает `[Исправлено...]`.
 * [x] **`pathSecurity.js`** — null-byte, UNC, Windows drive letters, глубина обхода.
 * [x] **`reporter.js`** — исправлен `escapeCdata` (`]]>` без `&gt;`), атомарная запись, лимиты CDATA.
-* [x] **Все 9 LLM-тестов проходят** (`tests/run-all.test.js`, `npm run test:llm`).
+* [x] **LLM-тесты проходят** при `RUN_LLM_TESTS=true`: 9 сценариев в `tests/run-all.test.js` (`npm run test:llm`); LLM-тесты есть также в `planner.test.js`, `agent-loop.test.js`, `self-correction.test.js`. В обычном `npm test` они помечены `skip`.
 
 ### Этап 5: Дальнейшее развитие — В планах
 * [ ] Инструмент безопасного поиска по кодовой базе (`searchInFiles`).
 * [ ] Автоматическое дообучение роутера на подтверждённых успешных сессиях.
+  * Частично реализовано: `reinforceOutcome()` вызывается в `routes.js` по факту определения навыка (онлайн-дообучение), а `trainStep`/`trainBatch`/`save`/`load` доступны в `NeuralSkillRouter`. Не хватает батч-переобучения только на подтверждённых сессиях.
 * [ ] Интерактивное подтверждение опасных действий (`deleteFile`) в свободном режиме через UI.
 * [ ] WebSocket как альтернатива SSE для более гибкого стриминга.
 * [ ] Плагинная система инструментов (реестр загружается из `tools/*.js`).

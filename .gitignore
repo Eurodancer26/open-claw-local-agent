@@ -1,4 +1,3 @@
-@"
 # Node
 node_modules/
 npm-debug.log*
@@ -22,9 +21,11 @@ models/neural_router_weights.json
 # Модели (гигантские веса)
 models/*.gguf
 
-# Песочница — только пустая структура
+# Песочница и свободный режим — только пустая структура
 tests/sandbox/*
 !tests/sandbox/.gitkeep
+tests/free_mode/*
+!tests/free_mode/.gitkeep
 
 # Логи и секреты
 *.log
@@ -37,4 +38,3 @@ tests/sandbox/*
 Thumbs.db
 .vscode/
 .idea/
-"@ | Set-Content .gitignore -Encoding utf8

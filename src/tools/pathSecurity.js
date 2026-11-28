@@ -6,9 +6,19 @@ export const WORKSPACE_ROOT = path.resolve();
 export const SANDBOX_REL = path.join('tests', 'sandbox');
 export const SANDBOX_DIR = path.resolve(WORKSPACE_ROOT, SANDBOX_REL);
 
-export const sandboxConfig = {
-  strictDefault: true // true — жёстко всё в tests/sandbox, false — свобода выбора в пределах проекта
-};
+/**
+ * Дефолтный режим песочницы.
+ *
+ * Важно: это ЕДИНСТВЕННЫЙ дефолт, он заморожен и НИКОГДА не мутируется на
+ * уровне запроса. Фактический режим передаётся явным параметром { strict }
+ * в resolveSafePath (и далее через инструменты/executor), поэтому
+ * параллельные запросы с разными strictSandbox не перетирают друг друга.
+ */
+export const DEFAULT_STRICT_SANDBOX = true;
+
+export const sandboxConfig = Object.freeze({
+  strictDefault: DEFAULT_STRICT_SANDBOX // только чтение дефолта, без мутации на запрос
+});
 
 function isWindowsDrivePath(p) {
   return /^[a-zA-Z]:[\\/]/.test(p);
@@ -78,7 +88,10 @@ async function verifyNearestExistingAncestor(targetPath, realRoot) {
 /**
  * Строгая проверка безопасности пути с поддержкой жёсткого режима песочницы по умолчанию.
  */
-export async function resolveSafePath(userPath) {
+export async function resolveSafePath(userPath, options = {}) {
+  const strict =
+    typeof options?.strict === 'boolean' ? options.strict : DEFAULT_STRICT_SANDBOX;
+
   if (!userPath || typeof userPath !== 'string') {
     throw new Error('Некорректный путь: путь должен быть непустой строкой.');
   }
@@ -96,10 +109,10 @@ export async function resolveSafePath(userPath) {
     throw new Error('Нарушение безопасности: абсолютные Windows/UNC пути запрещены.');
   }
 
-  const activeRoot = sandboxConfig.strictDefault ? SANDBOX_DIR : WORKSPACE_ROOT;
+  const activeRoot = strict ? SANDBOX_DIR : WORKSPACE_ROOT;
 
   let targetInput = trimmedInput;
-  if (sandboxConfig.strictDefault) {
+  if (strict) {
     await fs.mkdir(SANDBOX_DIR, { recursive: true });
     const cleanedRel = stripLeadingSandboxPrefix(trimmedInput);
     if (path.isAbsolute(cleanedRel)) {
@@ -113,7 +126,7 @@ export async function resolveSafePath(userPath) {
 
   if (relativeToActiveRoot.startsWith('..') || path.isAbsolute(relativeToActiveRoot)) {
     throw new Error(
-      sandboxConfig.strictDefault
+      strict
         ? 'Нарушение безопасности: в строгом режиме работа разрешена только внутри tests/sandbox/.'
         : 'Нарушение безопасности: выход за пределы рабочей директории запрещен.'
     );

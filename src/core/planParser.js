@@ -1,10 +1,16 @@
 // src/core/planParser.js
+import { MAX_PLAN_STEPS, clampPlanSteps } from './limits.js';
+
+// ВАЖНО: список должен совпадать с ключами toolsRegistry (src/tools/registry.js).
+// Иначе normalizeStepObject молча отбрасывает шаг (баг 1.1: createDir отсутствовал).
+// Синхронность зафиксирована тестом tests/plan-parser-tools.test.js.
 const KNOWN_TOOLS = new Set([
-  'readFile', 'writeFile', 'deleteFile', 'listDir',
+  'readFile', 'writeFile', 'createDir', 'deleteFile', 'listDir',
   'analyzeProject', 'generateUnitTest', 'runCommand'
 ]);
 
-const MAX_STEPS = 64;
+// Единый лимит шагов (см. src/core/limits.js) — реэкспорт для потребителей плана.
+export { MAX_PLAN_STEPS };
 
 function normalizeStepObject(rawObj, index) {
   if (!rawObj || typeof rawObj !== 'object' || Array.isArray(rawObj)) {
@@ -236,10 +242,10 @@ function normalizePlan(parsed) {
     rawSteps = [parsed];
   }
 
-  const normalized = rawSteps
-    .map((item, idx) => normalizeStepObject(item, idx))
-    .filter(Boolean)
-    .slice(0, MAX_STEPS);
+  const normalized = clampPlanSteps(
+    rawSteps.map((item, idx) => normalizeStepObject(item, idx)).filter(Boolean),
+    'planParser'
+  );
 
   return normalized.map((s, idx) => ({ ...s, step: idx + 1 }));
 }

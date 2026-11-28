@@ -1,19 +1,18 @@
 // src/core/executor.js
 import { toolsRegistry } from '../tools/registry.js';
+import { getStrictCommandPolicy, listStrictAllowedCommands } from '../tools/safeCommands.js';
+import { MAX_PLAN_STEPS } from './limits.js';
 
-const MAX_STEPS = 128;
+// T5: лимит шагов берётся из единого источника (src/core/limits.js),
+// чтобы не было скрытого рассинхрона с planParser.js (было 64 vs 128).
+export { MAX_PLAN_STEPS };
+const MAX_STEPS = MAX_PLAN_STEPS;
 
 function isPlainObject(v) {
   return v && typeof v === 'object' && !Array.isArray(v);
 }
 
-/**
- * Проверяет обязательные аргументы инструмента ДО его вызова.
- * Возвращает { valid: true } или { valid: false, error: 'текст' }.
- * Неизвестные инструменты здесь не валидируются — их отловит
- * проверка toolsRegistry ниже.
- */
-function validateArguments(tool, args) {
+function validateArguments(tool, args, strict = undefined) {
   if (!isPlainObject(args)) {
     return { valid: false, error: `Аргументы инструмента "${tool}" должны быть объектом` };
   }
@@ -30,8 +29,26 @@ function validateArguments(tool, args) {
       if (typeof args.filePath !== 'string' || !args.filePath.trim()) {
         return { valid: false, error: 'Инструмент "writeFile" требует непустой arguments.filePath' };
       }
+      if (/[\\/]\s*$/.test(args.filePath)) {
+        return {
+          valid: false,
+          error: `Инструмент "writeFile" получил путь "${args.filePath}", заканчивающийся слэшем — похоже, это директория. Используй createDir для создания папки.`
+        };
+      }
       if (args.content === undefined) {
         return { valid: false, error: 'Инструмент "writeFile" требует arguments.content (может быть пустой строкой)' };
+      }
+      break;
+
+    case 'createDir':
+      if (typeof args.dirPath !== 'string' || !args.dirPath.trim()) {
+        return { valid: false, error: 'Инструмент "createDir" требует непустой arguments.dirPath' };
+      }
+      if (/\.\w{1,8}$/.test(args.dirPath.trim()) && !/[\\/]/.test(args.dirPath)) {
+        return {
+          valid: false,
+          error: `Инструмент "createDir" получил "${args.dirPath}" — это похоже на имя файла (есть расширение). Для файлов используй writeFile.`
+        };
       }
       break;
 
@@ -51,14 +68,31 @@ function validateArguments(tool, args) {
       }
       break;
 
-    case 'runCommand':
-      if (typeof args.commandId !== 'string' && typeof args.command !== 'string') {
+    case 'runCommand': {
+      const commandId =
+        typeof args.commandId === 'string'
+          ? args.commandId
+          : typeof args.command === 'string'
+            ? args.command
+            : null;
+      if (!commandId) {
         return { valid: false, error: 'Инструмент "runCommand" требует arguments.commandId (или command)' };
       }
+      // Ранний отказ до запуска процесса: в strict команды, читающие весь
+      // репозиторий, запрещены (режим приходит явным параметром).
+      if (strict === true && getStrictCommandPolicy(commandId) === 'deny') {
+        return {
+          valid: false,
+          error:
+            `Инструмент "runCommand" запрещён в строгом режиме песочницы: команда "${commandId}" ` +
+            `может отдать данные вне tests/sandbox/. Разрешены: ${listStrictAllowedCommands().join(', ')}. ` +
+            `Для листинга внутри песочницы используй listDir.`
+        };
+      }
       break;
+    }
 
     default:
-      // Неизвестные инструменты валидируются отдельно (через toolsRegistry).
       break;
   }
 
@@ -84,6 +118,9 @@ function normalizeStep(rawStep, index) {
     if (args.filePath === undefined && typeof rawStep.filePath === 'string') args.filePath = rawStep.filePath;
     if (args.filePath === undefined && typeof rawStep.path === 'string') args.filePath = rawStep.path;
     if (args.content === undefined && rawStep.content !== undefined) args.content = rawStep.content;
+  } else if (tool === 'createDir') {
+    if (args.dirPath === undefined && typeof rawStep.dirPath === 'string') args.dirPath = rawStep.dirPath;
+    if (args.dirPath === undefined && typeof rawStep.path === 'string') args.dirPath = rawStep.path;
   } else if (tool === 'readFile' || tool === 'deleteFile') {
     if (args.filePath === undefined && typeof rawStep.filePath === 'string') args.filePath = rawStep.filePath;
     if (args.filePath === undefined && typeof rawStep.path === 'string') args.filePath = rawStep.path;
@@ -137,6 +174,15 @@ function formatToolOutput(toolName, result) {
     return `Записано в ${result.filePath}`;
   }
 
+  if (toolName === 'createDir') {
+    if (typeof result.message === 'string' && result.message.trim().length > 0) {
+      return result.message;
+    }
+    if (typeof result.dirPath === 'string') {
+      return result.created ? `Создана директория ${result.dirPath}` : `Директория уже существует: ${result.dirPath}`;
+    }
+  }
+
   if (toolName === 'deleteFile' && typeof result.filePath === 'string') {
     return `Удалён ${result.filePath}`;
   }
@@ -164,8 +210,6 @@ function interpolateStepValue(value, resultsByStep, lastReadOutput = '') {
 
       const prev = resultsByStep.get(stepNum);
       if (prev) {
-        // Приоритет — «чистый» rawOutput (без [Исправлено] и т.п.),
-        // затем обычный output (совместимость со старыми записями).
         const candidate = typeof prev.rawOutput === 'string' ? prev.rawOutput : prev.output;
         if (typeof candidate === 'string') return candidate;
       }
@@ -195,7 +239,38 @@ function safeProgress(onProgress, event) {
   try {
     onProgress(event);
   } catch (err) {
+    // Прерывание — не «шум» колбэка: оно должно остановить выполнение плана,
+    // а не быть проглоченным вместе с остальными ошибками прогресса.
+    if (err?.name === 'AbortError') throw err;
     console.error('[executor] onProgress threw:', err?.message || err);
+  }
+}
+
+/**
+ * AbortController активного executePlan. Зачем:
+ *  - прогресс-колбэк и инструменты (runCommand) видят сигнал обрыва
+ *    через options.signal и не продолжают работу;
+ *  - глобальная ссылка нужна только чтобы вложенные вызовы могли прервать
+ *    активный план, поэтому она снимается на ЛЮБОМ выходе из executePlan
+ *    (иначе повторное использование можно было бы считать регрессией).
+ */
+let activeExecutionController = null;
+
+export function getActiveExecutionSignal() {
+  return activeExecutionController ? activeExecutionController.signal : null;
+}
+
+export function abortActiveExecution(reason = 'Генерация прервана') {
+  if (activeExecutionController && !activeExecutionController.signal.aborted) {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    if (!err.name || err.name === 'Error') err.name = 'AbortError';
+    activeExecutionController.abort(err);
+  }
+}
+
+function clearActiveExecution(controller) {
+  if (activeExecutionController === controller) {
+    activeExecutionController = null;
   }
 }
 
@@ -205,135 +280,95 @@ export async function executePlan(
   session = null,
   fixStepCallback = null,
   allowSelfCorrection = true,
-  maxCorrectionsPerStep = 2
+  maxCorrectionsPerStep = 2,
+  strict = undefined,
+  options = {}
 ) {
-  if (!Array.isArray(plan) || plan.length === 0) {
-    return {
-      success: false,
-      error: 'План пуст или имеет некорректный формат',
-      results: []
-    };
+  // Режим песочницы — явный параметр запроса, а не глобальное состояние:
+  // один и тот же режим применяется ко всем шагам плана, не затрагивая
+  // параллельные запросы с другим strictSandbox.
+  const toolOptions = typeof strict === 'boolean' ? { strict } : {};
+
+  const executionController = new AbortController();
+  activeExecutionController = executionController;
+  let externalSignal = options.signal;
+  let externalAbortHandler = null;
+  if (externalSignal && typeof externalSignal.addEventListener === 'function') {
+    if (externalSignal.aborted) {
+      executionController.abort(externalSignal.reason);
+    } else {
+      externalAbortHandler = () => executionController.abort(externalSignal.reason);
+      externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+    }
+  }
+  toolOptions.signal = executionController.signal;
+
+  try {
+    return await runPlanSteps();
+  } finally {
+    if (externalSignal && externalAbortHandler) {
+      externalSignal.removeEventListener('abort', externalAbortHandler);
+    }
+    clearActiveExecution(executionController);
   }
 
-  if (plan.length > MAX_STEPS) {
-    return {
-      success: false,
-      error: `План содержит слишком много шагов (${plan.length} > ${MAX_STEPS})`,
-      results: []
-    };
-  }
-
-  const results = [];
-  const resultsByStep = new Map();
-  const seenSignatures = new Set();
-  let lastReadOutput = '';
-
-  for (let i = 0; i < plan.length; i += 1) {
-    const normalizedInitial = normalizeStep(plan[i], i);
-    if (!normalizedInitial || !normalizedInitial.tool) {
-      const errMsg = `Некорректный шаг плана на позиции ${i + 1}: отсутствует или пуст tool`;
-      return { success: false, error: errMsg, results };
+  async function runPlanSteps() {
+    if (!Array.isArray(plan) || plan.length === 0) {
+      return {
+        success: false,
+        error: 'План пуст или имеет некорректный формат',
+        results: []
+      };
     }
 
-    let step = {
-      ...normalizedInitial,
-      arguments: interpolateStepValue(normalizedInitial.arguments, resultsByStep, lastReadOutput)
-    };
+    if (plan.length > MAX_STEPS) {
+      return {
+        success: false,
+        error: `План содержит слишком много шагов (${plan.length} > ${MAX_STEPS})`,
+        results: []
+      };
+    }
 
-    let attempts = 0;
-    let stepCompleted = false;
-    let wasCorrected = false;
+    const results = [];
+    const resultsByStep = new Map();
+    const seenSignatures = new Set();
+    let lastReadOutput = '';
 
-    while (!stepCompleted) {
-      step = {
-        ...step,
-        arguments: interpolateStepValue(step.arguments, resultsByStep, lastReadOutput)
+    for (let i = 0; i < plan.length; i += 1) {
+      // Обрыв клиента в середине плана — не выполняем оставшиеся шаги.
+      if (executionController.signal.aborted) {
+        return {
+          success: false,
+          aborted: true,
+          error: 'Генерация прервана: клиент разорвал соединение',
+          results
+        };
+      }
+
+      const normalizedInitial = normalizeStep(plan[i], i);
+      if (!normalizedInitial || !normalizedInitial.tool) {
+        const errMsg = `Некорректный шаг плана на позиции ${i + 1}: отсутствует или пуст tool`;
+        return { success: false, error: errMsg, results };
+      }
+
+      let step = {
+        ...normalizedInitial,
+        arguments: interpolateStepValue(normalizedInitial.arguments, resultsByStep, lastReadOutput)
       };
 
-      // Валидация аргументов ДО вызова инструмента
-      const validation = validateArguments(step.tool, step.arguments);
-      if (!validation.valid) {
-        const argErr = validation.error;
+      let attempts = 0;
+      let stepCompleted = false;
+      let wasCorrected = false;
 
-        if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
-          safeProgress(onProgress, {
-            type: 'step_result',
-            step: step.step,
-            tool: step.tool,
-            success: false,
-            error: `${argErr} (Пробую исправить...)`
-          });
+      while (!stepCompleted) {
+        step = {
+          ...step,
+          arguments: interpolateStepValue(step.arguments, resultsByStep, lastReadOutput)
+        };
 
-          attempts += 1;
-          const fixedRaw = await fixStepCallback(step, argErr, session, results);
-          const normalizedFixed = normalizeStep(fixedRaw, i);
-          if (normalizedFixed && normalizedFixed.tool) {
-            step = { ...normalizedFixed, step: step.step };
-            wasCorrected = true;
-            continue;
-          }
-        }
-
-        safeProgress(onProgress, {
-          type: 'step_result',
-          step: step.step,
-          tool: step.tool,
-          success: false,
-          error: argErr
-        });
-        return { success: false, error: argErr, results };
-      }
-
-      const signature = JSON.stringify({ tool: step.tool, arguments: step.arguments });
-      if (attempts > 0 && seenSignatures.has(signature)) {
-        const loopErr = `Loop Guard: повторный идентичный шаг "${step.tool}" без прогресса`;
-        safeProgress(onProgress, {
-          type: 'step_result',
-          step: step.step,
-          tool: step.tool,
-          success: false,
-          error: loopErr
-        });
-        return { success: false, error: loopErr, results };
-      }
-      seenSignatures.add(signature);
-
-      safeProgress(onProgress, {
-        type: 'step_start',
-        step: step.step,
-        tool: step.tool,
-        description: wasCorrected ? `${step.description} [исправлено]` : step.description
-      });
-
-      const toolDef = toolsRegistry[step.tool];
-      if (!toolDef || typeof toolDef.execute !== 'function') {
-        const unknownToolErr = `Неизвестный или недоступный инструмент: "${step.tool}"`;
-        safeProgress(onProgress, {
-          type: 'step_result',
-          step: step.step,
-          tool: step.tool,
-          success: false,
-          error: unknownToolErr
-        });
-
-        if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
-          attempts += 1;
-          const fixedRaw = await fixStepCallback(step, unknownToolErr, session, results);
-          const normalizedFixed = normalizeStep(fixedRaw, i);
-          if (normalizedFixed && normalizedFixed.tool) {
-            step = { ...normalizedFixed, step: step.step };
-            wasCorrected = true;
-            continue;
-          }
-        }
-        return { success: false, error: unknownToolErr, results };
-      }
-
-      try {
-        const execResult = await toolDef.execute(step.arguments);
-
-        if (execResult && execResult.success === false) {
-          const toolErr = execResult.error || execResult.message || `Ошибка выполнения "${step.tool}"`;
+        const validation = validateArguments(step.tool, step.arguments, strict);
+        if (!validation.valid) {
+          const argErr = validation.error;
 
           if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
             safeProgress(onProgress, {
@@ -341,11 +376,11 @@ export async function executePlan(
               step: step.step,
               tool: step.tool,
               success: false,
-              error: `${toolErr} (Пробую исправить...)`
+              error: `${argErr} (Пробую исправить...)`
             });
 
             attempts += 1;
-            const fixedRaw = await fixStepCallback(step, toolErr, session, results);
+            const fixedRaw = await fixStepCallback(step, argErr, session, results);
             const normalizedFixed = normalizeStep(fixedRaw, i);
             if (normalizedFixed && normalizedFixed.tool) {
               step = { ...normalizedFixed, step: step.step };
@@ -359,81 +394,177 @@ export async function executePlan(
             step: step.step,
             tool: step.tool,
             success: false,
-            error: toolErr
+            error: argErr
           });
-          return { success: false, error: toolErr, results };
+          return { success: false, error: argErr, results };
         }
 
-        const rawFormatted = formatToolOutput(step.tool, execResult);
-        if (step.tool === 'readFile' && typeof execResult?.content === 'string') {
-          lastReadOutput = execResult.content;
-        }
-
-        // rawOutput — «чистый» вывод для интерполяции {{stepN.output}}.
-        // displayOutput — с пометкой [Исправлено] для отображения в чате.
-        const rawOutput = rawFormatted;
-        const displayOutput = wasCorrected
-          ? `[Исправлено через ${step.tool}] ${rawFormatted}`
-          : rawFormatted;
-
-        const stepRecord = {
-          step: step.step,
-          tool: step.tool,
-          success: true,
-          output: displayOutput,
-          rawOutput
-        };
-
-        results.push(stepRecord);
-        resultsByStep.set(step.step, stepRecord);
-
-        safeProgress(onProgress, {
-          type: 'step_result',
-          step: step.step,
-          tool: step.tool,
-          success: true,
-          result: displayOutput
-        });
-
-        stepCompleted = true;
-      } catch (err) {
-        const caughtErr = err?.message || String(err);
-
-        if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
+        const signature = JSON.stringify({ tool: step.tool, arguments: step.arguments });
+        // T4: сигнатуры сверяем для ВСЕХ шагов плана, а не только после самокоррекции
+        // (раньше условие attempts > 0 пропускало «эхо»-повторы внутри одного плана).
+        if (seenSignatures.has(signature)) {
+          const loopErr =
+            `Loop Guard: шаг ${step.step} (позиция ${i + 1}) повторяет уже выполненный шаг ` +
+            `"${step.tool}" с идентичными аргументами — выполнение остановлено, ` +
+            `чтобы не зациклиться. Измените шаг или аргументы.`;
           safeProgress(onProgress, {
             type: 'step_result',
             step: step.step,
             tool: step.tool,
             success: false,
-            error: `${caughtErr} (Пробую исправить...)`
+            error: loopErr
           });
-
-          attempts += 1;
-          const fixedRaw = await fixStepCallback(step, caughtErr, session, results);
-          const normalizedFixed = normalizeStep(fixedRaw, i);
-          if (normalizedFixed && normalizedFixed.tool) {
-            step = { ...normalizedFixed, step: step.step };
-            wasCorrected = true;
-            continue;
-          }
+          return { success: false, error: loopErr, results };
         }
+        seenSignatures.add(signature);
 
         safeProgress(onProgress, {
-          type: 'step_result',
+          type: 'step_start',
           step: step.step,
           tool: step.tool,
-          success: false,
-          error: caughtErr
+          description: wasCorrected ? `${step.description} [исправлено]` : step.description
         });
 
-        return { success: false, error: caughtErr, results };
+        const toolDef = toolsRegistry[step.tool];
+        if (!toolDef || typeof toolDef.execute !== 'function') {
+          const unknownToolErr = `Неизвестный или недоступный инструмент: "${step.tool}"`;
+          safeProgress(onProgress, {
+            type: 'step_result',
+            step: step.step,
+            tool: step.tool,
+            success: false,
+            error: unknownToolErr
+          });
+
+          if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
+            attempts += 1;
+            const fixedRaw = await fixStepCallback(step, unknownToolErr, session, results);
+            const normalizedFixed = normalizeStep(fixedRaw, i);
+            if (normalizedFixed && normalizedFixed.tool) {
+              step = { ...normalizedFixed, step: step.step };
+              wasCorrected = true;
+              continue;
+            }
+          }
+          return { success: false, error: unknownToolErr, results };
+        }
+
+        try {
+          const execResult = await toolDef.execute(step.arguments, toolOptions);
+
+          if (execResult && execResult.success === false) {
+            const toolErr = execResult.error || execResult.message || `Ошибка выполнения "${step.tool}"`;
+
+            // Прерывание — не ошибка инструмента: самокоррекция запрещена.
+            if (execResult.aborted || executionController.signal.aborted) {
+              safeProgress(onProgress, {
+                type: 'step_result',
+                step: step.step,
+                tool: step.tool,
+                success: false,
+                error: toolErr
+              });
+              return { success: false, aborted: true, error: toolErr, results };
+            }
+
+            if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
+              safeProgress(onProgress, {
+                type: 'step_result',
+                step: step.step,
+                tool: step.tool,
+                success: false,
+                error: `${toolErr} (Пробую исправить...)`
+              });
+
+              attempts += 1;
+              const fixedRaw = await fixStepCallback(step, toolErr, session, results);
+              const normalizedFixed = normalizeStep(fixedRaw, i);
+              if (normalizedFixed && normalizedFixed.tool) {
+                step = { ...normalizedFixed, step: step.step };
+                wasCorrected = true;
+                continue;
+              }
+            }
+
+            safeProgress(onProgress, {
+              type: 'step_result',
+              step: step.step,
+              tool: step.tool,
+              success: false,
+              error: toolErr
+            });
+            return { success: false, error: toolErr, results };
+          }
+
+          const rawFormatted = formatToolOutput(step.tool, execResult);
+          if (step.tool === 'readFile' && typeof execResult?.content === 'string') {
+            lastReadOutput = execResult.content;
+          }
+
+          const rawOutput = rawFormatted;
+          const displayOutput = wasCorrected
+            ? `[Исправлено через ${step.tool}] ${rawFormatted}`
+            : rawFormatted;
+
+          const stepRecord = {
+            step: step.step,
+            tool: step.tool,
+            success: true,
+            output: displayOutput,
+            rawOutput
+          };
+
+          results.push(stepRecord);
+          resultsByStep.set(step.step, stepRecord);
+
+          safeProgress(onProgress, {
+            type: 'step_result',
+            step: step.step,
+            tool: step.tool,
+            success: true,
+            result: displayOutput
+          });
+
+          stepCompleted = true;
+        } catch (err) {
+          const caughtErr = err?.message || String(err);
+
+          if (allowSelfCorrection && attempts < maxCorrectionsPerStep && typeof fixStepCallback === 'function') {
+            safeProgress(onProgress, {
+              type: 'step_result',
+              step: step.step,
+              tool: step.tool,
+              success: false,
+              error: `${caughtErr} (Пробую исправить...)`
+            });
+
+            attempts += 1;
+            const fixedRaw = await fixStepCallback(step, caughtErr, session, results);
+            const normalizedFixed = normalizeStep(fixedRaw, i);
+            if (normalizedFixed && normalizedFixed.tool) {
+              step = { ...normalizedFixed, step: step.step };
+              wasCorrected = true;
+              continue;
+            }
+          }
+
+          safeProgress(onProgress, {
+            type: 'step_result',
+            step: step.step,
+            tool: step.tool,
+            success: false,
+            error: caughtErr
+          });
+
+          return { success: false, error: caughtErr, results };
+        }
       }
     }
-  }
 
-  return {
-    success: true,
-    error: null,
-    results
-  };
+    return {
+      success: true,
+      error: null,
+      results
+    };
+  }
 }

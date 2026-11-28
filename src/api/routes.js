@@ -1,15 +1,21 @@
 // src/api/routes.js
 import { Router } from 'express';
 import { initLlamaEngine } from '../core/engine.js';
-import { getToolsSystemPrompt, sandboxConfig } from '../tools/registry.js';
+import { getToolsSystemPrompt, DEFAULT_STRICT_SANDBOX } from '../tools/registry.js';
 import { executePlan } from '../core/executor.js';
 import { initMind, updateMindState, pushRecursiveThought, getMindContextSummary } from '../core/recursiveMind.js';
 import { gpuMutex } from '../core/mutex.js';
 import { ExecutionTracer } from '../core/reporter.js';
 import { NeuralSkillRouter } from '../core/neuralRouter.js';
-import { pruneMessages, buildRecentHistoryBlock } from '../core/contextPruner.js';
+import {
+  pruneMessages,
+  buildRecentHistoryBlock,
+  MAX_DIALOG_HISTORY_MESSAGES,
+  MAX_DIALOG_HISTORY_CHARS
+} from '../core/contextPruner.js';
 import { safeParseJsonPayload, extractActionPlan } from '../core/planParser.js';
 import { formatStepResultForChat, buildNonStreamPrompt, buildCognitivePrompt, formatRoutingHint } from './chatFormatter.js';
+import { createClientAbortGuard, createAbortError, raceAgainstClientAbort } from './streamGuard.js';
 
 const router = Router();
 
@@ -48,8 +54,6 @@ async function applyRouterFeedback(userMessage, actualSkill, tracer, isTestRun) 
   }
 }
 
-// Короткий текстовый промпт — используется при mode='chat'.
-// Никаких правил JSON, никаких инструментов, никаких конкретных имён файлов.
 function buildTextOnlyPrompt({
   currentMode,
   strictDefault,
@@ -79,17 +83,47 @@ ${userMessage}
 Твой ответ:`;
 }
 
-// Строгий retry для mode='action', если план не распарсился.
-function buildActionRetryPrompt({ userMessage, originalResponse }) {
+// Подсказка под конкретную ошибку — помогает модели не повторять ту же ошибку
+// в цикле самокоррекции.
+function getErrorHint(errorMessage) {
+  const msg = String(errorMessage || '').toLowerCase();
+
+  if (/абсолютные.*windows|unc|абсолютный путь/i.test(msg)) {
+    return 'ПОДСКАЗКА: используй ОТНОСИТЕЛЬНЫЙ путь от корня проекта. Пример: вместо "D:\\project\\src" пиши "src". Без буквы диска и без ведущего слэша.';
+  }
+  if (/путь указывает на директорию/i.test(msg)) {
+    return 'ПОДСКАЗКА: для чтения содержимого директории используй listDir (или analyzeProject для статистики). readFile — только для файлов.';
+  }
+  if (/директорию, а не файл.*удаление/i.test(msg)) {
+    return 'ПОДСКАЗКА: инструмент deleteFile удаляет только файлы. Директории не удаляются.';
+  }
+  if (/mkdir.*не разрешен|команда.*mkdir/i.test(msg)) {
+    return 'ПОДСКАЗКА: mkdir не существует. Для создания папки используй инструмент createDir с аргументом dirPath.';
+  }
+  if (/loop guard/i.test(msg)) {
+    return 'ПОДСКАЗКА: предыдущая попытка не сработала. Верни ДРУГОЙ план — измени путь или инструмент. Не повторяй то же самое.';
+  }
+  if (/writeFile.*заканчивается слэшем/i.test(msg)) {
+    return 'ПОДСКАЗКА: writeFile создаёт файл, а не папку. Если пользователь просит папку — используй createDir.';
+  }
+  return '';
+}
+
+function buildActionRetryPrompt({ userMessage, originalResponse, strictDefault }) {
   const preview = String(originalResponse ?? '').slice(0, 800);
+  const pathRule = strictDefault
+    ? 'Пути относительны tests/sandbox/. Без префикса "tests/sandbox/".'
+    : 'Ты в СВОБОДНОМ режиме. Пути относительны корня проекта. Абсолютные пути (C:\\..., D:\\...) и "../" запрещены.';
+
   return `Твой предыдущий ответ НЕ является валидным JSON-массивом шагов:
 ---
 ${preview}
 ---
 
 Повтори ответ СТРОГО в виде JSON-массива. БЕЗ markdown (\`\`\`json), БЕЗ текста до и после.
-Только 7 инструментов: readFile, writeFile, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand.
+Только 8 инструментов: readFile, writeFile, createDir, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand.
 Формат: [{"step":1,"tool":"writeFile","arguments":{"filePath":"...","content":"..."},"description":"..."}]
+${pathRule}
 Имя файла и содержимое бери ДОСЛОВНО из запроса пользователя ниже — не подставляй примеры.
 
 ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
@@ -98,25 +132,32 @@ ${userMessage}
 Твой ответ (только JSON, без markdown):`;
 }
 
-// Промпт для самокоррекции упавшего шага.
-// ВАЖНО: передаём userMessage — иначе модель «забывает» исходную цель
-// и подставляет типичные примеры (config.json, test.js и т.п.).
-function buildFixPrompt(step, errorMessage, userMessage, prevResults = []) {
+function buildFixPrompt(step, errorMessage, userMessage, prevResults = [], strictDefault = true) {
   const completedStepsSummary = Array.isArray(prevResults) && prevResults.length > 0
     ? `Уже выполненные шаги: ${prevResults.map((r) => `step ${r.step} (${r.tool})`).join(', ')}.`
     : 'Выполненных шагов пока нет.';
+
+  const pathRule = strictDefault
+    ? 'Режим strict: пути относительны tests/sandbox/ (без префикса "tests/sandbox/"). Вне песочницы работать нельзя.'
+    : 'Режим free: пути относительны КОРНЯ ПРОЕКТА (WORKSPACE_ROOT). Абсолютные пути (C:\\..., D:\\..., //server/...) и "../" ЗАПРЕЩЕНЫ.';
+
+  const hint = getErrorHint(errorMessage);
+  const hintBlock = hint ? `\n${hint}\n` : '';
 
   return `ИСХОДНЫЙ ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
 ${userMessage}
 
 ОШИБКА выполнения шага: "${errorMessage}"
-${completedStepsSummary}
+${hintBlock}${completedStepsSummary}
 УПАВШИЙ ШАГ: ${JSON.stringify(step)}
+
+${pathRule}
 
 ЗАДАЧА: верни СТРОГО один JSON-объект исправленного шага, который решает ИСХОДНЫЙ запрос пользователя.
 - Если исходный запрос просит создать файл X с текстом Y — используй ИМЕННО X и Y из запроса, не выдумывай.
+- Если исходный запрос просит создать ПАПКУ — используй инструмент createDir, а не writeFile.
 - Не подставляй "типичные" имена файлов (config.json, test.js, index.js и т.п.), если пользователь их не назвал.
-- Разрешены ТОЛЬКО инструменты: readFile, writeFile, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand.
+- Разрешены ТОЛЬКО инструменты: readFile, writeFile, createDir, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand.
 - Не повторяй уже выполненные успешные шаги.
 
 Формат ответа (без markdown, без пояснений):
@@ -125,7 +166,16 @@ ${completedStepsSummary}
 Твой ответ:`;
 }
 
-async function askModelToFixStep(step, errorMessage, session, tracer, prevResults, userMessage) {
+async function askModelToFixStep(
+  step,
+  errorMessage,
+  session,
+  tracer,
+  prevResults,
+  userMessage,
+  strictDefault,
+  signal = undefined
+) {
   tracer.log(
     'routes.js',
     'askModelToFixStep',
@@ -134,11 +184,17 @@ async function askModelToFixStep(step, errorMessage, session, tracer, prevResult
     JSON.stringify(step)
   );
 
-  const fixPrompt = buildFixPrompt(step, errorMessage, userMessage, prevResults);
+  const fixPrompt = buildFixPrompt(step, errorMessage, userMessage, prevResults, strictDefault);
 
   await gpuMutex.acquire();
   try {
-    const rawFix = await session.prompt(fixPrompt);
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    const rawFix = await session.prompt(
+      fixPrompt,
+      signal ? { signal, stopOnAbortSignal: true } : undefined
+    );
     const parsedFix = safeParseJsonPayload(rawFix);
     if (parsedFix && typeof parsedFix === 'object' && !Array.isArray(parsedFix)) {
       tracer.log('routes.js', 'askModelToFixStep', 'OK', 'Получено исправление от модели', JSON.stringify(parsedFix));
@@ -163,6 +219,12 @@ router.post('/v1/chat/completions', async (req, res) => {
     }
   };
 
+  // Обрыв соединения клиента: следим за res 'close'/'aborted' и получаем
+  // AbortSignal, которым можно остановить генерацию node-llama-cpp.
+  const clientGuard = createClientAbortGuard(req, res);
+  const abortSignal = clientGuard.signal;
+  const promptOptions = { signal: abortSignal, stopOnAbortSignal: true };
+
   let session = null;
   const isTestRun = process.env.RUN_LLM_TESTS === 'true';
   const tracer = new ExecutionTracer(isTestRun ? 'test' : 'chat');
@@ -170,11 +232,11 @@ router.post('/v1/chat/completions', async (req, res) => {
 
   try {
     const { messages, stream = false, strictSandbox } = req.body;
-    let modeChanged = false;
-    if (typeof strictSandbox === 'boolean' && sandboxConfig.strictDefault !== strictSandbox) {
-      sandboxConfig.strictDefault = strictSandbox;
-      modeChanged = true;
-    }
+
+    // Режим песочницы — только этого запроса, без глобальной мутации:
+    // если strictSandbox не передан, берём замороженный дефолт.
+    const requestStrict =
+      typeof strictSandbox === 'boolean' ? strictSandbox : DEFAULT_STRICT_SANDBOX;
 
     const prunedMessages = pruneMessages(messages);
     if (prunedMessages.length === 0) {
@@ -184,13 +246,13 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     const userMessage = prunedMessages[prunedMessages.length - 1].content;
     const recentHistoryBlock = buildRecentHistoryBlock(prunedMessages);
-    const currentMode = sandboxConfig.strictDefault ? 'strict' : 'free';
+    const currentMode = requestStrict ? 'strict' : 'free';
     tracer.setContext(currentMode, userMessage);
     tracer.log(
       'routes.js',
       'POST /v1/chat/completions',
       'INFO',
-      `stream=${stream}, mode=${currentMode}, reset=${modeChanged}, prunedCount=${prunedMessages.length}`,
+      `stream=${stream}, mode=${currentMode}, strict=${requestStrict}, prunedCount=${prunedMessages.length}`,
       JSON.stringify(prunedMessages, null, 2)
     );
 
@@ -213,21 +275,18 @@ router.post('/v1/chat/completions', async (req, res) => {
     }));
 
     const mindSummary = await getMindContextSummary();
-    const modeBadge = sandboxConfig.strictDefault ? '[Песочница]' : '[Свободный режим]';
+    const modeBadge = requestStrict ? '[Песочница]' : '[Свободный режим]';
     const toolsPrompt = getToolsSystemPrompt();
     session = await initLlamaEngine({
-      forceReset: modeChanged,
+      forceReset: false, // сессия не сбрасывается из-за смены режима: режим теперь per-request
       mode: currentMode
     });
 
-    // ============================================================
-    // НЕСТРИМОВЫЙ РЕЖИМ
-    // ============================================================
     if (!stream) {
       const prompt = expectedMode === 'chat'
         ? buildTextOnlyPrompt({
             currentMode,
-            strictDefault: sandboxConfig.strictDefault,
+            strictDefault: requestStrict,
             routingDecision,
             mindSummary,
             recentHistoryBlock,
@@ -235,7 +294,7 @@ router.post('/v1/chat/completions', async (req, res) => {
           })
         : buildNonStreamPrompt({
             currentMode,
-            strictDefault: sandboxConfig.strictDefault,
+            strictDefault: requestStrict,
             toolsPrompt,
             routingDecision,
             mindSummary,
@@ -244,8 +303,10 @@ router.post('/v1/chat/completions', async (req, res) => {
           });
       tracer.setPromptSent(prompt);
 
-      const responseText = await session.prompt(prompt);
+      const responseText = await session.prompt(prompt, promptOptions);
       releaseGpuOnce();
+      // Клиент ушёл, пока считалась генерация: отвечать некому.
+      if (clientGuard.clientGone) return;
       const cleanResp = responseText.trim();
       tracer.setFinalResponse(cleanResp);
       tracer.log('routes.js', 'session.prompt (non-stream)', 'OK', `Ответ сформирован (mode=${expectedMode})`);
@@ -266,9 +327,6 @@ router.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
-    // ============================================================
-    // СТРИМОВЫЙ РЕЖИМ
-    // ============================================================
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -276,7 +334,8 @@ router.post('/v1/chat/completions', async (req, res) => {
     const sendSSE = (data) => {
       const chunk = data?.choices?.[0]?.delta?.content;
       if (chunk) chatTranscript += chunk;
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      // Никаких записей в уже закрытый/разрушенный ответ.
+      clientGuard.send(`data: ${JSON.stringify(data)}\n\n`);
     };
 
     sendSSE({ choices: [{ delta: { role: 'assistant', content: `${modeBadge} Думаю...\n` } }] });
@@ -285,7 +344,7 @@ router.post('/v1/chat/completions', async (req, res) => {
     if (expectedMode === 'chat') {
       const textPrompt = buildTextOnlyPrompt({
         currentMode,
-        strictDefault: sandboxConfig.strictDefault,
+        strictDefault: requestStrict,
         routingDecision,
         mindSummary,
         recentHistoryBlock,
@@ -293,14 +352,15 @@ router.post('/v1/chat/completions', async (req, res) => {
       });
       tracer.setPromptSent(textPrompt);
 
-      const rawText = await session.prompt(textPrompt);
+      const rawText = await session.prompt(textPrompt, promptOptions);
       releaseGpuOnce();
+      // Клиент ушёл — не пишем в мысль, не дообучаем роутер и не шлём [DONE].
+      if (clientGuard.clientGone) throw createAbortError();
       tracer.setModelPlan(rawText);
       tracer.log('routes.js', 'session.prompt (stream, chat-mode)', 'OK', 'Получен текстовый ответ');
 
       const cleanText = rawText.trim();
 
-      // Даже если модель ошибочно вернула JSON — не исполняем, отдаём как текст.
       const planLookalike = extractActionPlan(rawText);
       if (planLookalike.length > 0) {
         tracer.log(
@@ -318,14 +378,13 @@ router.post('/v1/chat/completions', async (req, res) => {
       tracer.setFinalResponse(chatTranscript.trim());
       tracer.log('routes.js', 'TextResponse', 'OK', 'Текстовый ответ отправлен в чат');
       await tracer.commitAndSavePdf();
-      res.write('data: [DONE]\n\n');
-      return res.end();
+      return clientGuard.end('data: [DONE]\n\n');
     }
 
     // ---------- ВЕТКА 2: ДЕЙСТВИЕ / MIXED / UNKNOWN ----------
     const cognitivePrompt = buildCognitivePrompt({
       currentMode,
-      strictDefault: sandboxConfig.strictDefault,
+      strictDefault: requestStrict,
       toolsPrompt,
       routingDecision,
       mindSummary,
@@ -334,18 +393,24 @@ router.post('/v1/chat/completions', async (req, res) => {
     });
     tracer.setPromptSent(cognitivePrompt);
 
-    let modelResponse = await session.prompt(cognitivePrompt);
+    let modelResponse = await session.prompt(cognitivePrompt, promptOptions);
     releaseGpuOnce();
+    // Клиент ушёл во время генерации — план не выполняем.
+    if (clientGuard.clientGone) throw createAbortError();
     tracer.setModelPlan(modelResponse);
     tracer.log('routes.js', 'session.prompt (stream)', 'OK', `Получен ответ от модели (mode=${expectedMode})`);
 
     let plan = extractActionPlan(modelResponse);
 
-    // Если это был action-запрос, но модель не вернула план — один retry со строгим требованием JSON.
     if (plan.length === 0 && expectedMode === 'action') {
       tracer.log('routes.js', 'ActionRetry', 'RETRY', 'План не распознан, запрашиваем повтор в строгом формате');
-      const retryPrompt = buildActionRetryPrompt({ userMessage, originalResponse: modelResponse });
-      const retryResponse = await session.prompt(retryPrompt);
+      const retryPrompt = buildActionRetryPrompt({
+        userMessage,
+        originalResponse: modelResponse,
+        strictDefault: requestStrict
+      });
+      const retryResponse = await session.prompt(retryPrompt, promptOptions);
+      if (clientGuard.clientGone) throw createAbortError();
       const retryPlan = extractActionPlan(retryResponse);
       if (retryPlan.length > 0) {
         modelResponse = retryResponse;
@@ -362,7 +427,6 @@ router.post('/v1/chat/completions', async (req, res) => {
     if (!isJsonPlan) {
       const cleanText = modelResponse.trim();
 
-      // Не портим веса роутера, если action провалился в текст
       if (expectedMode !== 'action') {
         await applyRouterFeedback(userMessage, 'chat', tracer, isTestRun);
       } else {
@@ -371,11 +435,11 @@ router.post('/v1/chat/completions', async (req, res) => {
 
       await pushRecursiveThought(`Запрос: ${userMessage} -> Ответ: ${cleanText.slice(0, 100)}`, 1, false);
       sendSSE({ choices: [{ delta: { content: `\n${cleanText}\n` } }] });
+      if (clientGuard.clientGone) throw createAbortError();
       tracer.setFinalResponse(chatTranscript.trim());
       tracer.log('routes.js', 'TextResponse', 'OK', 'Текстовый ответ отправлен в чат (fallback)');
       await tracer.commitAndSavePdf();
-      res.write('data: [DONE]\n\n');
-      return res.end();
+      return clientGuard.end('data: [DONE]\n\n');
     }
 
     await pushRecursiveThought(`Запрос: ${userMessage} -> План из ${plan.length} шагов`, 1, false);
@@ -384,6 +448,10 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     let currentStepMeta = null;
     const progressCallback = (event) => {
+      // Клиент ушёл — не выполняем следующие шаги плана.
+      if (clientGuard.clientGone) {
+        throw createAbortError();
+      }
       if (event.type === 'step_start') {
         const stepObj = plan.find((p) => (p.step || 1) === event.step) || {};
         const argsObj = stepObj.arguments || {};
@@ -427,14 +495,36 @@ router.post('/v1/chat/completions', async (req, res) => {
       }
     };
 
-    const executionReport = await executePlan(
-      plan,
-      progressCallback,
-      session,
-      // ВАЖНО: userMessage пробрасывается в askModelToFixStep через замыкание
-      (step, err, sess, prevResults) => askModelToFixStep(step, err, sess, tracer, prevResults, userMessage),
-      true
-    );
+    let executionReport;
+    try {
+      executionReport = await raceAgainstClientAbort(
+        executePlan(
+          plan,
+          progressCallback,
+          session,
+          (step, err, sess, prevResults) =>
+            askModelToFixStep(
+              step,
+              err,
+              sess,
+              tracer,
+              prevResults,
+              userMessage,
+              requestStrict,
+              abortSignal
+            ),
+          true,
+          2,
+          requestStrict,
+          { signal: abortSignal }
+        ),
+        clientGuard
+      );
+    } finally {
+      // executePlan получил сигнал обрыва и вернул report.aborted (сам он не бросает):
+      // превращаем это в AbortError, чтобы внешний catch отработал как при обрыве.
+      if (executionReport?.aborted || clientGuard.clientGone) throw createAbortError();
+    }
 
     if (executionReport.success) {
       const actualSkill = inferActualSkillFromPlan(plan);
@@ -450,20 +540,35 @@ router.post('/v1/chat/completions', async (req, res) => {
     tracer.setFinalResponse(chatTranscript.trim());
     const reportPath = await tracer.commitAndSavePdf();
     console.log(`📄 Сводный отчёт обновлён: ${reportPath}`);
-    res.write('data: [DONE]\n\n');
-    res.end();
+    clientGuard.end('data: [DONE]\n\n');
   } catch (error) {
-    console.error('Ошибка:', error);
-    tracer.log('routes.js', 'GlobalCatch', 'ERROR', error.message);
+    // Обрыв соединения клиента — не ошибка сервера: не отдаём 500 и не пишем в мёртвый ответ.
+    const aborted =
+      error?.name === 'AbortError' ||
+      clientGuard.clientGone ||
+      /разорвал соединение/i.test(String(error?.message || ''));
+
+    if (aborted) {
+      console.log('⏹️ Генерация прервана: клиент разорвал соединение');
+      tracer.log('routes.js', 'ClientAborted', 'WARN', error?.message || 'Клиент разорвал соединение');
+    } else {
+      console.error('Ошибка:', error);
+      tracer.log('routes.js', 'GlobalCatch', 'ERROR', error.message);
+    }
+
     tracer.setFinalResponse(chatTranscript.trim() || `Ошибка: ${error.message}`);
     await tracer.commitAndSavePdf();
-    if (!res.headersSent) {
-      res.status(500).json({ error: { message: error.message } });
-    } else {
-      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+
+    if (!aborted) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: { message: error.message } });
+      } else {
+        clientGuard.send(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+        clientGuard.end();
+      }
     }
-    res.end();
   } finally {
+    clientGuard.dispose();
     releaseGpuOnce();
   }
 });
@@ -472,11 +577,11 @@ router.post('/v1/session/reset', async (req, res) => {
   await gpuMutex.acquire();
   try {
     const { strictSandbox } = req.body || {};
-    if (typeof strictSandbox === 'boolean') {
-      sandboxConfig.strictDefault = strictSandbox;
-    }
-
-    const currentMode = sandboxConfig.strictDefault ? 'strict' : 'free';
+    // Без глобальной мутации: режим этого вызова определяем локально.
+    const currentMode =
+      (typeof strictSandbox === 'boolean' ? strictSandbox : DEFAULT_STRICT_SANDBOX)
+        ? 'strict'
+        : 'free';
     neuralRouter.resetMemory();
 
     await initMind();
@@ -494,7 +599,7 @@ router.post('/v1/session/reset', async (req, res) => {
     res.json({
       success: true,
       mode: currentMode,
-      strictSandbox: sandboxConfig.strictDefault
+      strictSandbox: currentMode === 'strict'
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -507,7 +612,13 @@ router.get('/v1/mind', async (req, res) => {
   const mindData = await initMind();
   res.json({
     ...mindData,
-    strictSandbox: sandboxConfig.strictDefault
+    strictSandbox: DEFAULT_STRICT_SANDBOX,
+    // T6: единый источник лимитов истории диалога для клиента,
+    // чтобы public/app.js не держал свой несогласованный лимит.
+    dialogHistory: {
+      maxMessages: MAX_DIALOG_HISTORY_MESSAGES,
+      maxChars: MAX_DIALOG_HISTORY_CHARS
+    }
   });
 });
 

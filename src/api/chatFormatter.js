@@ -5,7 +5,8 @@ const FORBIDDEN_TOOL_NAMES = [
   'chat', 'strictMode', 'date', 'time', 'getDate', 'getTime',
   'format', 'formatCode', 'prettier', 'lint', 'deploy', 'hash',
   'generateCode', 'bundle', 'rollup', 'webpack', 'publish',
-  'fetch', 'http', 'curl', 'browser', 'search', 'webSearch'
+  'fetch', 'http', 'curl', 'browser', 'search', 'webSearch',
+  'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch'
 ];
 
 function parseStepResultData(rawResult) {
@@ -47,6 +48,17 @@ export function formatStepResultForChat(toolName, rawResult) {
       return `✔ Успешно. Файл записан: ${filePath}${bytes}\n`;
     }
     return '✔ Успешно. Файл записан.\n';
+  }
+
+  if (toolName === 'createDir') {
+    const dirPath = data?.dirPath || data?.path || data?.target;
+    const created = data?.created;
+    if (dirPath) {
+      return created
+        ? `✔ Успешно. Директория создана: ${dirPath}\n`
+        : `✔ Успешно. Директория уже существует: ${dirPath}\n`;
+    }
+    return '✔ Успешно. Директория создана.\n';
   }
 
   if (toolName === 'deleteFile') {
@@ -170,22 +182,58 @@ export function formatRoutingHint(routingDecision) {
 
 const FORBIDDEN_TOOLS_LIST = FORBIDDEN_TOOL_NAMES.map((n) => `«${n}»`).join(', ');
 
-// Сокращённый набор правил. Специально убраны ВСЕ конкретные имена файлов,
-// чтобы модель не могла их скопировать (few-shot contamination).
-const COGNITIVE_RULES = `ПРАВИЛА (СТРОГО):
+/**
+ * Возвращает правила, зависящие от режима.
+ * Strict: всё внутри tests/sandbox/.
+ * Free:   корень проекта, но без выхода за WORKSPACE_ROOT и без абсолютных путей.
+ */
+function buildModeRules(strictDefault) {
+  if (strictDefault) {
+    return {
+      pathRule:
+        '5. Все относительные пути автоматически привязываются к tests/sandbox/. Префикс "tests/sandbox/" в плане писать НЕ нужно ("config.json" → tests/sandbox/config.json).',
+      outsideRule:
+        '6. Запрос вне tests/sandbox/ («в корне проекта», "../", абсолютный путь) → НЕ создавай файл молча. Ответь текстом: «сейчас включён строгий режим песочницы, я не могу работать вне tests/sandbox/», и предложи путь внутри песочницы.'
+    };
+  }
+  return {
+    pathRule:
+      '5. Ты в СВОБОДНОМ режиме. Пути относительны корня проекта (WORKSPACE_ROOT). Не приписывай "tests/sandbox/". Примеры: "." — корень проекта, "src" — папка src/, "tests/sandbox" — песочница.',
+    outsideRule:
+      '6. Запрос за пределы проекта ("../", абсолютные пути вида C:\\... или \\\\server\\...) → откажись текстом: «выход за пределы рабочей директории проекта запрещён». Абсолютные пути в free-режиме не используй вообще — только относительные от корня проекта.'
+  };
+}
+
+function buildCognitiveRules(strictDefault) {
+  const { pathRule, outsideRule } = buildModeRules(strictDefault);
+
+  return `ПРАВИЛА (СТРОГО):
 1. Беседа / вопросы / приветствия → ответ ТОЛЬКО текстом на русском. Задачи с файлами → ответ ТОЛЬКО JSON-массивом. Не смешивай.
 2. Формат плана: [{"step":1,"tool":"writeFile","arguments":{"filePath":"...","content":"..."},"description":"..."}]. БЕЗ markdown, БЕЗ \`\`\`json, БЕЗ текста до и после JSON.
-3. Только 7 инструментов: readFile, writeFile, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand. Инструментов ${FORBIDDEN_TOOLS_LIST} и любых других НЕ СУЩЕСТВУЕТ.
+3. Только 8 инструментов: readFile, writeFile, createDir, deleteFile, listDir, analyzeProject, generateUnitTest, runCommand. Инструментов ${FORBIDDEN_TOOLS_LIST} и любых других НЕ СУЩЕСТВУЕТ.
 4. Если инструмента нет (дата, погода, курс) → ответ ТОЛЬКО текстом: «У меня нет такого инструмента».
-5. Относительные пути автоматически привязываются к tests/sandbox/. Префикс "tests/sandbox/" в planе писать НЕ нужно.
-6. Запрос вне tests/sandbox/ («в корне», «../», абсолютный) → откажись текстом и предложи путь внутри песочницы.
+${pathRule}
+${outsideRule}
 7. Подстановка результата шага N: строка "{{stepN.output}}". Никакого JS-кода и конкатенации.
-8. ГЛАВНОЕ: имя файла и содержимое бери ДОСЛОВНО из ТЕКУЩЕГО запроса пользователя. НЕ копируй из примеров, памяти, предыдущих ответов. Если пользователь просит файл X с текстом Y — используй именно X и Y. Не подставляй «типичные» примеры.
+8. ГЛАВНОЕ: имя файла и содержимое бери ДОСЛОВНО из ТЕКУЩЕГО запроса пользователя. НЕ копируй из примеров, памяти, предыдущих ответов. Если пользователь просит файл X с текстом Y — используй именно X и Y.
+9. ВЫБОР ИНСТРУМЕНТА по задаче:
+   - создать/записать/перезаписать файл → writeFile
+   - создать папку/директорию → createDir (НЕ writeFile!)
+   - прочитать содержимое файла → readFile
+   - удалить файл → deleteFile
+   - перечислить файлы в папке → listDir
+   - анализ / структура / статистика / аудит проекта → analyzeProject
+   - сгенерировать unit-тест по модулю → generateUnitTest
+   - версия node/npm, git status/diff, листинг корня через CLI → runCommand (в СТРОГОМ режиме git status/diff ЗАПРЕЩЕНЫ — они видят весь репозиторий; для листинга внутри песочницы используй listDir)
+10. СОЗДАНИЕ ПАПКИ vs ФАЙЛА: если пользователь говорит «создай папку X», «создай директорию X», «сделай каталог X» — используй createDir с dirPath=X. НЕ используй writeFile с пустым content для создания папки.
+11. В свободном режиме абсолютные пути (C:\\..., D:\\..., //server/...) ЗАПРЕЩЕНЫ. Используй только относительные от корня проекта.
 
 ФОРМАТ (значения подставляй из запроса, не копируй буквально):
 • «Привет! Кто ты?» → текст: «Привет! Я автономный ИИ-агент Конструкт АИ.»
 • «Какая сегодня дата?» → текст: «У меня нет инструмента для получения текущей даты.»
-• «Создай файл FILE_A с текстом TEXT_X» → [{"step":1,"tool":"writeFile","arguments":{"filePath":"FILE_A","content":"TEXT_X"},"description":"Создать файл"}]`;
+• «Создай файл FILE_A с текстом TEXT_X» → [{"step":1,"tool":"writeFile","arguments":{"filePath":"FILE_A","content":"TEXT_X"},"description":"Создать файл"}]
+• «Создай папку DIR_A» → [{"step":1,"tool":"createDir","arguments":{"dirPath":"DIR_A"},"description":"Создать папку"}]`;
+}
 
 function renderMemoryBlock(mindSummary) {
   const text = String(mindSummary || '').trim();
@@ -205,6 +253,7 @@ export function buildNonStreamPrompt({
   userMessage
 }) {
   const routingHint = formatRoutingHint(routingDecision);
+  const rules = buildCognitiveRules(strictDefault);
 
   return `РЕЖИМ: ${currentMode.toUpperCase()} (${strictDefault ? 'песочница tests/sandbox/' : 'свободный'}).
 
@@ -212,7 +261,7 @@ ${toolsPrompt}
 
 ${routingHint}
 ${renderMemoryBlock(mindSummary)}${recentHistoryBlock}
-${COGNITIVE_RULES}
+${rules}
 
 ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
 ${userMessage}
@@ -230,6 +279,7 @@ export function buildCognitivePrompt({
   userMessage
 }) {
   const routingHint = formatRoutingHint(routingDecision);
+  const rules = buildCognitiveRules(strictDefault);
 
   return `РЕЖИМ: ${currentMode.toUpperCase()} (${strictDefault ? 'песочница tests/sandbox/' : 'свободный'}).
 
@@ -237,7 +287,7 @@ ${toolsPrompt}
 
 ${routingHint}
 ${renderMemoryBlock(mindSummary)}${recentHistoryBlock}
-${COGNITIVE_RULES}
+${rules}
 
 ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
 ${userMessage}

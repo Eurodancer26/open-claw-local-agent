@@ -4,6 +4,12 @@ export const DEFAULT_MAX_CHARS_PER_MESSAGE = 2000;
 export const DEFAULT_MAX_HISTORY_MESSAGES = 6;
 export const DEFAULT_MAX_HISTORY_CHARS = 6000;
 
+// T6: единый источник лимитов истории диалога.
+// Клиент (public/app.js) получает их из /v1/mind и больше не держит
+// собственный несогласованный MAX_HISTORY_MESSAGES = 12.
+export const MAX_DIALOG_HISTORY_MESSAGES = DEFAULT_MAX_HISTORY_MESSAGES;
+export const MAX_DIALOG_HISTORY_CHARS = DEFAULT_MAX_HISTORY_CHARS;
+
 const MIN_MAX_MESSAGES = 1;
 const MIN_CHARS_PER_MESSAGE = 100;
 const MIN_HISTORY_CHARS = 500;
